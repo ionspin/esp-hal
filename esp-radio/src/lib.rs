@@ -33,7 +33,7 @@
 //!
 //! ```rust, no_run
 #![doc = esp_hal::before_snippet!()]
-//! use esp_hal::interrupt::software::SoftwareInterruptControl;
+//! use esp_hal::interrupt::software::SoftwareInterrupt;
 //! use esp_hal::ram;
 //! use esp_hal::timer::timg::TimerGroup;
 //!
@@ -41,11 +41,10 @@
 //! esp_alloc::heap_allocator!(size: 36 * 1024);
 //!
 //! let timg0 = TimerGroup::new(peripherals.TIMG0);
-//! let sw_interrupt = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
 //!
 //! // THIS IS IMPORTANT FOR WIFI AND BLE: You MUST start the scheduler
 //! // before initializing the radio!
-//! esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
+//! esp_rtos::start(timg0.timer0);
 #![cfg_attr(
     wifi_driver_supported,
     doc = r#"
@@ -183,8 +182,6 @@ use esp_hal as hal;
 #[instability::unstable]
 pub use esp_phy::CalibrationResult;
 use esp_radio_rtos_driver as preempt;
-#[cfg(all(esp32, feature = "unstable"))]
-use hal::analog::adc::{release_adc2, try_claim_adc2};
 #[cfg(feature = "wifi")]
 use hal::{after_snippet, before_snippet};
 use sys::include::esp_phy_calibration_data_t;
@@ -207,6 +204,8 @@ pub(crate) mod sys {
     pub use esp_wifi_sys_esp32s2::*;
     #[cfg(esp32s3)]
     pub use esp_wifi_sys_esp32s3::*;
+    #[cfg(esp32s31)]
+    pub use esp_wifi_sys_esp32s31::*;
 }
 
 use crate::refcount::Refcount;
@@ -237,6 +236,8 @@ macro_rules! unstable_module {
 
 mod asynch;
 mod compat;
+#[cfg(esp32s31)]
+mod compiler_rt_abi;
 mod interrupt_dispatch;
 mod radio_clocks;
 mod refcount;
@@ -301,15 +302,15 @@ const _: () = {
 /// - The function may return an error if interrupts are disabled.
 /// - The function may return an error if initializing the underlying driver fails.
 pub(crate) fn init() {
-    #[cfg(all(esp32, feature = "unstable"))]
-    if try_claim_adc2(unsafe { hal::Internal::conjure() }).is_err() {
-        panic!(
-            "ADC2 is currently in use by esp-hal, but esp-radio requires it for Wi-Fi operation."
-        );
+    esp_hal::if_unstable_hal! {
+        #[cfg(esp32)]
+        if hal::analog::adc::try_claim_adc2(unsafe { hal::Internal::conjure() }).is_err() {
+            panic!(
+                "ADC2 is currently in use by esp-hal, but esp-radio requires it for Wi-Fi operation."
+            );
+        }
+        esp_hal::rtc_cntl::WakeLock::acquire();
     }
-
-    #[cfg(feature = "unstable")]
-    esp_hal::rtc_cntl::WakeLock::acquire();
 
     if !preempt::initialized() {
         panic!("The scheduler must be initialized before initializing the radio.");
@@ -325,10 +326,15 @@ pub(crate) fn init() {
         );
     }
 
+    // Ungate the modem clocks first: `enable_wifi_power_domain` pulses the
+    // modem reset, which is ineffective while the clocks are gated — and
+    // esp-phy's clock guard has gated them again by the time we re-init.
+    // (ESP-IDF never gates these clocks, so its power-up reset always lands.)
+    radio_clocks::init_radio_clocks();
+
     crate::common_adapter::enable_wifi_power_domain();
 
     wifi_set_log_verbose();
-    radio_clocks::init_radio_clocks();
 
     #[cfg(feature = "coex")]
     match crate::wifi::coex_initialize() {
@@ -352,12 +358,34 @@ pub(crate) fn deinit() {
     #[cfg(feature = "ble")]
     ble::shutdown_ble_isr();
 
-    #[cfg(all(esp32, feature = "unstable"))]
-    // Allow using `ADC2` again
-    release_adc2(unsafe { esp_hal::Internal::conjure() });
+    // Gate the BT clocks (the Wi-Fi driver gates its own clocks during
+    // `wifi_deinit`), power down the modem power domain, and gate the
+    // remaining modem clocks, mirroring ESP-IDF's fixed-mask clock control
+    // (`periph_ll_wifi_module_disable_clk_set_rst` and friends). This must
+    // only run once all radios are off: PHY teardown still needs the modem
+    // clocks.
+    #[cfg(feature = "ble")]
+    crate::radio_clocks::enable_bt(false);
+    crate::common_adapter::disable_wifi_power_domain();
+    crate::radio_clocks::deinit_radio_clocks();
 
-    #[cfg(feature = "unstable")]
-    esp_hal::rtc_cntl::WakeLock::release();
+    // After the modem power domain has been powered down, the PHY driver's
+    // internal init flag must be reset, otherwise the next `phy_wakeup_init`
+    // assumes retained PHY registers that the power-down wiped (mirrors
+    // ESP-IDF's `esp_phy_modem_deinit`, "Fix the issue caused by the power
+    // domain off. This issue is only on ESP32C3.").
+    #[cfg(esp32c3)]
+    unsafe {
+        crate::sys::include::phy_init_flag()
+    };
+
+    esp_hal::if_unstable_hal! {
+        // Allow using `ADC2` again
+        #[cfg(esp32)]
+        hal::analog::adc::release_adc2(unsafe { esp_hal::Internal::conjure() });
+
+        esp_hal::rtc_cntl::WakeLock::release();
+    }
 
     debug!("Radio deinitialized");
 }
@@ -375,7 +403,7 @@ static RADIO_REFCOUNT: Refcount = Refcount::new();
 impl RadioRefGuard {
     /// Increments the refcount. If the old count was 0, it performs hardware init.
     /// If hardware init fails, it rolls back the refcount only once.
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         debug!("Creating RadioRefGuard");
 
         RADIO_REFCOUNT.increment(init);

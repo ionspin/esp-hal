@@ -14,15 +14,14 @@
 //!    * `ULP (Ultra-Low Power)` wake
 //!    * `BT (Bluetooth) wake` - light sleep only
 
-// ESP32-C5/C61 currently only support timer wakeup, which does not use `RefCell`.
-#[cfg(not(any(esp32c5, esp32c61)))]
-use core::cell::RefCell;
+use crate::{
+    gpio,
+    peripherals::LPWR,
+    rtc_cntl::{Rtc, WakeupSource},
+};
 
-#[cfg(any(esp32, esp32s2, esp32s3))]
-use crate::gpio::RtcPin as RtcIoWakeupPinType;
-#[cfg(any(esp32c3, esp32c6, esp32c2, esp32h2))]
-use crate::gpio::RtcPinWithResistors as RtcIoWakeupPinType;
-use crate::{rtc_cntl::Rtc, time::Duration};
+#[cfg(soc_has_pmu)]
+mod pmu_common;
 
 #[cfg_attr(esp32, path = "esp32.rs")]
 #[cfg_attr(esp32s2, path = "esp32s2.rs")]
@@ -34,625 +33,279 @@ use crate::{rtc_cntl::Rtc, time::Duration};
 #[cfg_attr(esp32c2, path = "esp32c2.rs")]
 #[cfg_attr(esp32h2, path = "esp32h2.rs")]
 #[cfg_attr(esp32p4, path = "esp32p4.rs")]
+#[cfg_attr(esp32s31, path = "esp32s31.rs")]
 mod sleep_impl;
-
 pub use sleep_impl::*;
 
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
-/// Level at which a wake-up event is triggered
-pub enum WakeupLevel {
-    /// The wake-up event is triggered when the pin is low.
-    Low,
-    #[default]
-    ///  The wake-up event is triggered when the pin is high.
-    High,
-}
+#[cfg(sleep_has_wakeup_source_timer)]
+mod timer;
 
-#[procmacros::doc_replace]
-/// Represents a timer wake-up source, triggering an event after a specified
-/// duration.
-///
-/// ```rust, no_run
-/// # {before_snippet}
-/// # use esp_hal::delay::Delay;
-/// # use esp_hal::rtc_cntl::{reset_reason, sleep::TimerWakeupSource, wakeup_cause, Rtc, SocResetReason};
-/// # use esp_hal::system::Cpu;
-/// # use esp_hal::time::Duration;
-///
-/// let delay = Delay::new();
-/// let mut rtc = Rtc::new(peripherals.LPWR);
-///
-/// let reason = reset_reason(Cpu::ProCpu);
-/// let wake_reason = wakeup_cause();
-///
-/// println!("{:?} {?}", reason, wake_reason);
-///
-/// let timer = TimerWakeupSource::new(Duration::from_secs(5));
-/// delay.delay_millis(100);
-/// rtc.sleep_deep(&[&timer]);
-///
-/// # {after_snippet}
-/// ```
-#[derive(Debug, Default, Clone, Copy)]
-pub struct TimerWakeupSource {
-    /// The duration after which the wake-up event is triggered.
-    duration: Duration,
-}
+mod wakeup;
+pub(crate) use wakeup::*;
 
-impl TimerWakeupSource {
-    /// Creates a new timer wake-up source with the specified duration.
-    pub fn new(duration: Duration) -> Self {
-        Self { duration }
+/// Prepares the sleep hardware, and clears the wakeup sources of the previous run.
+///
+/// The wakeup-enable mask survives a deep-sleep wake, so here it still holds the request of the run
+/// that went to sleep. Two steps need the mask, in this order. First, the code releases the pads
+/// that the previous run armed. Then it clears the mask, because a program starts with no wakeup
+/// sources, and the drivers of the new run build the mask again.
+pub(crate) fn init(rtc: &Rtc<'_>) {
+    // First, because the pads that ended a deep sleep are readable only until the code below
+    // changes a path.
+    gpio::wakeup::record_wakeup();
+
+    // Release the pads after a deep-sleep wake only, and only if the previous
+    // run armed an IO wake source.
+    if super::reset_reason(crate::system::Cpu::ProCpu) == Some(super::SocResetReason::CoreDeepSleep)
+        && gpio::wakeup::wake_enabled()
+    {
+        gpio::wakeup::wake_io_reset();
     }
+
+    RtcSleepConfig::base_settings(rtc);
+
+    set_mask(0);
 }
 
-/// Errors that can occur when configuring RTC wake-up sources.
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum Error {
-    /// The selected pin is not a valid RTC pin.
-    NotRtcPin,
-    /// The maximum number of wake-up sources has been exceeded.
-    TooManyWakeupSources,
+/// Low-power management.
+///
+/// The sleep calls do not take the wakeup sources that end the sleep. Each driver enables the
+/// source that it owns, and the hardware wakeup-enable mask keeps that request until the driver
+/// clears it. The mask keeps it through a light sleep, and through a deep-sleep wake. A sleep call
+/// reads the mask back, and calculates the rest of the configuration from it.
+#[instability::unstable]
+pub struct LowPower<'d> {
+    _inner: LPWR<'d>,
 }
 
-#[procmacros::doc_replace]
-/// External wake-up source (Ext0).
-///
-/// ```rust, no_run
-/// # {before_snippet}
-/// # use esp_hal::delay::Delay;
-/// # use esp_hal::rtc_cntl::{reset_reason, sleep::{Ext0WakeupSource, TimerWakeupSource, WakeupLevel}, wakeup_cause, Rtc, SocResetReason};
-/// # use esp_hal::system::Cpu;
-/// # use esp_hal::gpio::{Input, InputConfig, Pull};
-/// # use esp_hal::time::Duration;
-///
-/// let delay = Delay::new();
-/// let mut rtc = Rtc::new(peripherals.LPWR);
-///
-/// let config = InputConfig::default().with_pull(Pull::None);
-/// let mut pin_4 = peripherals.GPIO4;
-/// let pin_4_input = Input::new(pin_4.reborrow(), config);
-///
-/// let reason = reset_reason(Cpu::ProCpu);
-/// let wake_reason = wakeup_cause();
-///
-/// println!("{:?} {?}", reason, wake_reason);
-///
-/// let timer = TimerWakeupSource::new(Duration::from_secs(30));
-///
-/// core::mem::drop(pin_4_input);
-/// let ext0 = Ext0WakeupSource::new(pin_4, WakeupLevel::High);
-///
-/// delay.delay_millis(100);
-/// rtc.sleep_deep(&[&timer, &ext0]);
-///
-/// # }
-/// ```
-#[cfg(any(esp32, esp32s2, esp32s3))]
-pub struct Ext0WakeupSource<P: RtcIoWakeupPinType> {
-    /// The pin used as the wake-up source.
-    pin: RefCell<P>,
-    /// The level at which the wake-up event is triggered.
-    level: WakeupLevel,
-}
+impl<'d> LowPower<'d> {
+    /// Creates a new `LowPower` driver.
+    pub fn new(lpwr: LPWR<'d>) -> Self {
+        Self { _inner: lpwr }
+    }
 
-#[cfg(any(esp32, esp32s2, esp32s3))]
-impl<P: RtcIoWakeupPinType> Ext0WakeupSource<P> {
-    /// Creates a new external wake-up source (Ext0``) with the specified pin
-    /// and wake-up level.
-    pub fn new(pin: P, level: WakeupLevel) -> Self {
-        Self {
-            pin: RefCell::new(pin),
-            level,
+    /// Arms the sleep alarm for `deadline`, and enables the timer wakeup source.
+    ///
+    /// The deadline is absolute, so the time between this call and the sleep does not make the
+    /// sleep shorter. The deadline is a standing request. The wake that it causes does not
+    /// disarm it, a later call replaces it, and [`Self::clear_wakeup_deadline`] removes it.
+    ///
+    /// A deadline in the past ends a light sleep immediately, and makes [`Self::sleep_deep`] panic.
+    #[cfg(sleep_has_wakeup_source_timer)]
+    pub fn set_wakeup_deadline(&mut self, deadline: crate::time::Instant) {
+        timer::set_deadline(deadline);
+    }
+
+    /// Disarms the sleep alarm, and disables the timer wakeup source.
+    #[cfg(sleep_has_wakeup_source_timer)]
+    pub fn clear_wakeup_deadline(&mut self) {
+        timer::clear_deadline();
+    }
+
+    /// Enters deep sleep, and does not return.
+    ///
+    /// In deep sleep the CPUs, most of the RAM, and all digital peripherals that are clocked from
+    /// APB_CLK are powered off. The wake resets the chip, so use the
+    /// [`#[esp_hal::ram(persistent)]`][procmacros::ram] attribute to keep a variable through the
+    /// sleep.
+    ///
+    /// The hardware cannot reject this sleep, because the function cannot return to report the
+    /// rejection. Use [`Self::sleep_deep_with_rejection`] for that.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no wakeup source is enabled, because then nothing can end the sleep. Panics also
+    /// if the armed wakeup deadline is too near for the sleep transition to catch it. In both
+    /// cases the chip never wakes again, and it gives no report of the cause.
+    #[cfg(sleep_deep_sleep)]
+    pub fn sleep_deep(&mut self, config: RtcSleepConfig) -> ! {
+        #[cfg(sleep_has_wakeup_source_timer)]
+        if enabled_sources().contains(WakeupSource::Timer) {
+            assert!(
+                !timer::deadline_missed(),
+                "the wakeup deadline is too near to be caught by the sleep transition"
+            );
         }
-    }
-}
 
-#[procmacros::doc_replace]
-/// External wake-up source (Ext1).
-///
-/// ```rust, no_run
-/// # {before_snippet}
-/// # use esp_hal::delay::Delay;
-/// # use esp_hal::rtc_cntl::{reset_reason, sleep::{Ext1WakeupSource, TimerWakeupSource, WakeupLevel}, wakeup_cause, Rtc, SocResetReason};
-/// # use esp_hal::system::Cpu;
-/// # use esp_hal::gpio::{Input, InputConfig, Pull, RtcPin};
-/// # use esp_hal::time::Duration;
-///
-/// let delay = Delay::new();
-/// let mut rtc = Rtc::new(peripherals.LPWR);
-///
-/// let config = InputConfig::default().with_pull(Pull::None);
-/// let mut pin_2 = peripherals.GPIO2;
-/// let mut pin_4 = peripherals.GPIO4;
-/// let pin_4_driver = Input::new(pin_4.reborrow(), config);
-///
-/// let reason = reset_reason(Cpu::ProCpu);
-/// let wake_reason = wakeup_cause();
-///
-/// println!("{:?} {?}", reason, wake_reason);
-///
-/// let timer = TimerWakeupSource::new(Duration::from_secs(30));
-///
-/// // Drop the driver to access `pin_4`
-/// core::mem::drop(pin_4_driver);
-///
-/// let mut wakeup_pins: [&mut dyn RtcPin; 2] = [&mut pin_4, &mut pin_2];
-///
-/// let ext1 = Ext1WakeupSource::new(&mut wakeup_pins, WakeupLevel::High);
-///
-/// delay.delay_millis(100);
-/// rtc.sleep_deep(&[&timer, &ext1]);
-///
-/// # }
-/// ```
-#[cfg(any(esp32, esp32s2, esp32s3))]
-pub struct Ext1WakeupSource<'a, 'b> {
-    /// A collection of pins used as wake-up sources.
-    pins: RefCell<&'a mut [&'b mut dyn RtcIoWakeupPinType]>,
-    /// The level at which the wake-up event is triggered across all pins.
-    level: WakeupLevel,
-}
+        self.sleep(config, SleepKind::Deep, false);
 
-#[cfg(any(esp32, esp32s2, esp32s3))]
-impl<'a, 'b> Ext1WakeupSource<'a, 'b> {
-    /// Creates a new external wake-up source (Ext1) with the specified pins and
-    /// wake-up level.
-    pub fn new(pins: &'a mut [&'b mut dyn RtcIoWakeupPinType], level: WakeupLevel) -> Self {
-        Self {
-            pins: RefCell::new(pins),
-            level,
-        }
-    }
-}
-
-#[procmacros::doc_replace(
-    "pin_low" => {
-        cfg(esp32c6) => "GPIO2",
-        cfg(esp32h2) => "GPIO9",
-    },
-    "pin_high" => {
-        cfg(esp32c6) => "GPIO3",
-        cfg(esp32h2) => "GPIO10"
-    },
-)]
-/// External wake-up source (Ext1).
-/// ```rust, no_run
-/// # {before_snippet}
-/// # use esp_hal::delay::Delay;
-/// # use esp_hal::rtc_cntl::{reset_reason, sleep::{Ext1WakeupSource, TimerWakeupSource, WakeupLevel}, wakeup_cause, Rtc, SocResetReason};
-/// # use esp_hal::system::Cpu;
-/// # use esp_hal::gpio::{Input, InputConfig, Pull, RtcPinWithResistors};
-/// # use esp_hal::time::Duration;
-/// #
-/// let delay = Delay::new();
-/// let mut rtc = Rtc::new(peripherals.LPWR);
-///
-/// let config = InputConfig::default().with_pull(Pull::None);
-/// let mut pin_low_input = Input::new(peripherals.__pin_low__.reborrow(), config);
-///
-/// let reason = reset_reason(Cpu::ProCpu);
-/// let wake_reason = wakeup_cause();
-///
-/// println!("{:?} {?}", reason, wake_reason);
-///
-/// let timer = TimerWakeupSource::new(Duration::from_secs(30));
-///
-/// core::mem::drop(pin_low_input);
-///
-/// let wakeup_pins: &mut [(&mut dyn RtcPinWithResistors, WakeupLevel)] =
-/// &mut [
-///     (&mut peripherals.__pin_low__, WakeupLevel::Low),
-///     (&mut peripherals.__pin_high__, WakeupLevel::High),
-/// ];
-///
-/// let ext1 = Ext1WakeupSource::new(wakeup_pins);
-///
-/// delay.delay_millis(100);
-/// rtc.sleep_deep(&[&timer, &ext1]);
-///
-/// # }
-/// ```
-#[cfg(any(esp32c6, esp32h2))]
-pub struct Ext1WakeupSource<'a, 'b> {
-    pins: RefCell<&'a mut [(&'b mut dyn RtcIoWakeupPinType, WakeupLevel)]>,
-}
-
-#[cfg(any(esp32c6, esp32h2))]
-impl<'a, 'b> Ext1WakeupSource<'a, 'b> {
-    /// Creates a new external wake-up source (Ext1) with the specified pins and
-    /// wake-up level.
-    pub fn new(pins: &'a mut [(&'b mut dyn RtcIoWakeupPinType, WakeupLevel)]) -> Self {
-        Self {
-            pins: RefCell::new(pins),
-        }
-    }
-}
-
-#[procmacros::doc_replace(
-    "pin0" => {
-        cfg(any(esp32c3, esp32c2)) => "GPIO2",
-        cfg(any(esp32s2, esp32s3)) => "GPIO17"
-    },
-    "pin1" => {
-        cfg(any(esp32c3, esp32c2)) => "GPIO3",
-        cfg(any(esp32s2, esp32s3)) => "GPIO18"
-    },
-    "rtc_pin_trait" => {
-        cfg(any(esp32c3, esp32c2)) => "gpio::RtcPinWithResistors",
-        cfg(any(esp32s2, esp32s3)) => "gpio::RtcPin"
-    },
-)]
-/// RTC_IO wakeup source
-///
-/// RTC_IO wakeup allows configuring any combination of RTC_IO pins with
-/// arbitrary wakeup levels to wake up the chip from sleep. This wakeup source
-/// can be used to wake up from both light and deep sleep.
-///
-/// ```rust, no_run
-/// # {before_snippet}
-/// # use esp_hal::delay::Delay;
-/// # use esp_hal::gpio::{self, Input, InputConfig, Pull};
-/// # use esp_hal::rtc_cntl::{reset_reason,
-/// #   sleep::{RtcioWakeupSource, TimerWakeupSource, WakeupLevel},
-/// #   wakeup_cause, Rtc, SocResetReason
-/// # };
-/// # use esp_hal::system::Cpu;
-/// # use esp_hal::time::Duration;
-///
-/// let mut rtc = Rtc::new(peripherals.LPWR);
-///
-/// let reason = reset_reason(Cpu::ProCpu);
-/// let wake_reason = wakeup_cause();
-///
-/// println!("{:?} {?}", reason, wake_reason);
-///
-/// let delay = Delay::new();
-/// let timer = TimerWakeupSource::new(Duration::from_secs(10));
-/// let wakeup_pins: &mut [(&mut dyn __rtc_pin_trait__, WakeupLevel)] = &mut [
-///     (&mut peripherals.__pin0__, WakeupLevel::Low),
-///     (&mut peripherals.__pin1__, WakeupLevel::High),
-/// ];
-///
-/// let rtcio = RtcioWakeupSource::new(wakeup_pins);
-/// delay.delay_millis(100);
-/// rtc.sleep_deep(&[&timer, &rtcio]);
-///
-/// # {after_snippet}
-/// ```
-#[cfg(any(esp32c3, esp32s2, esp32s3, esp32c2))]
-pub struct RtcioWakeupSource<'a, 'b> {
-    pins: RefCell<&'a mut [(&'b mut dyn RtcIoWakeupPinType, WakeupLevel)]>,
-}
-
-#[cfg(any(esp32c3, esp32s2, esp32s3, esp32c2))]
-impl<'a, 'b> RtcioWakeupSource<'a, 'b> {
-    /// Creates a new external GPIO wake-up source.
-    pub fn new(pins: &'a mut [(&'b mut dyn RtcIoWakeupPinType, WakeupLevel)]) -> Self {
-        Self {
-            pins: RefCell::new(pins),
-        }
-    }
-}
-
-/// LP Core wakeup source
-///
-/// Wake up from LP core. This wakeup source
-/// can be used to wake up from both light and deep sleep.
-#[cfg(esp32c6)]
-pub struct WakeFromLpCoreWakeupSource {}
-
-#[cfg(esp32c6)]
-impl WakeFromLpCoreWakeupSource {
-    /// Create a new instance of `WakeFromLpCoreWakeupSource`
-    pub fn new() -> Self {
-        Self {}
-    }
-}
-
-#[cfg(esp32c6)]
-impl Default for WakeFromLpCoreWakeupSource {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// ULP wakeup source
-///
-/// Wake up from ULP software interrupt, and/or ULP-RISCV Trap condition.
-/// Both of these triggers are enabled by default.
-/// This source will clear any outstanding software interrupts prior to entering sleep, by default.
-///
-/// S2 supports the following triggers (Refer to ESP32-S2 Technical Reference Manual, Table 9.4-3.
-/// Wakeup Source)
-///  - ULP-FSM software interrupt (unsure if this ALSO supports ULP-RISCV software interrupt)
-///  - ULP-RISCV Trap
-///
-/// S3 supports the following triggers (Refer to ESP32-S3 Technical Reference Manual, Table 10.4-3.
-/// Wakeup Source)
-///  - ULP-FSM software interrupt and ULP-RISCV software interrupt
-///  - ULP-RISCV Trap
-///
-/// This wakeup source can be used to wake up from both light and deep sleep.
-#[cfg(any(esp32s2, esp32s3))]
-pub struct UlpWakeupSource {
-    wake_on_interrupt: bool,
-    wake_on_trap: bool,
-    clear_interrupts_on_sleep: bool,
-}
-
-#[cfg(any(esp32s2, esp32s3))]
-impl UlpWakeupSource {
-    /// Create a new instance of `WakeFromUlpWakeupSource`
-    pub const fn new() -> Self {
-        Self {
-            wake_on_interrupt: true,
-            wake_on_trap: true,
-            clear_interrupts_on_sleep: true,
-        }
+        unreachable!("deep sleep without rejection cannot return")
     }
 
-    /// Enable wakeup triggered by software interrupt from ULP-FSM or ULP-RISCV
-    pub fn set_wake_on_interrupt(mut self, value: bool) -> Self {
-        self.wake_on_interrupt = value;
-        self
+    /// Enters deep sleep, and returns only if the hardware rejects the request.
+    ///
+    /// The hardware rejects a sleep if one of its wakeup sources is already asserted. Without the
+    /// rejection, the chip sleeps through the event that the caller wants to wake on. The return of
+    /// this function is the complete report, so it gives no other result.
+    ///
+    /// A rejected request returns the wake pads to their drivers, but it cannot return every pad.
+    /// Sleep entry disconnects the pads that no hold keeps, on the chips that need that step to
+    /// reach the deep-sleep current, and it cannot know their earlier configuration. Configure
+    /// those pads again if this function returns. ESP-IDF has the same limit in
+    /// `esp_deep_sleep_try_to_start`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no wakeup source is enabled.
+    #[cfg(sleep_deep_sleep)]
+    pub fn sleep_deep_with_rejection(&mut self, config: RtcSleepConfig) {
+        self.sleep(config, SleepKind::Deep, true);
     }
 
-    /// Enable wakeup triggered by ULP-RISCV Trap
-    pub fn set_wake_on_trap(mut self, value: bool) -> Self {
-        self.wake_on_trap = value;
-        self
+    /// Enters light sleep, and returns when a wakeup source ends it.
+    ///
+    /// Light sleep keeps the state of the digital domain, so the program continues at the same
+    /// place.
+    ///
+    /// The function also returns immediately, without a sleep, if no wakeup source is enabled, or
+    /// if the hardware rejects the request because a wakeup source is already asserted. It
+    /// reports neither case. For the caller, a refused sleep, a rejected sleep and a very short
+    /// sleep have the same result.
+    #[cfg(sleep_light_sleep)]
+    pub fn sleep_light(&mut self, config: RtcSleepConfig) {
+        self.sleep(config, SleepKind::Light, true);
     }
 
-    /// Enable clearing of latched wake-up interrupts prior to entering sleep
-    pub fn set_clear_interrupts_on_sleep(mut self, value: bool) -> Self {
-        self.clear_interrupts_on_sleep = value;
-        self
-    }
+    /// Calculates the sleep configuration from the wakeup-enable mask, and enters the sleep.
+    #[cfg(sleep_driver_supported)]
+    #[crate::ram]
+    fn sleep(&mut self, config: RtcSleepConfig, kind: SleepKind, allow_reject: bool) {
+        let rtc = Rtc::new(unsafe { crate::peripherals::RTC_TIMER::steal() });
 
-    /// Clears the wake-up interrupts
-    pub fn clear_interrupts(&self) {
-        crate::peripherals::LPWR::regs().int_clr().write(|w| {
-            w.cocpu_trap().clear_bit_by_one();
-            w.cocpu().clear_bit_by_one();
-            w.ulp_cp().clear_bit_by_one()
-        });
-    }
-}
+        let mut config = config;
+        config.set_sleep_kind(kind);
 
-#[cfg(any(esp32s2, esp32s3))]
-impl Default for UlpWakeupSource {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+        // The hooks run before `apply`, so that a request to keep a power domain powered reaches
+        // the hardware. They also run before the last read of the mask, because a hook can
+        // enable another source. The GPIO hook does this while it allocates its pins to the
+        // paths.
+        run_entry_hooks(&mut config);
 
-/// GPIO wakeup source
-///
-/// Wake up from GPIO high or low level. Any pin can be used with this wake up
-/// source. Configure the pin for wake up via
-/// [crate::gpio::Input::wakeup_enable].
-///
-/// This wakeup source can be used to wake up from light sleep only.
-pub struct GpioWakeupSource {}
+        config.apply();
 
-impl GpioWakeupSource {
-    /// Create a new instance of [GpioWakeupSource]
-    pub fn new() -> Self {
-        Self {}
-    }
-}
-
-impl Default for GpioWakeupSource {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl WakeSource for GpioWakeupSource {
-    fn apply(
-        &self,
-        _rtc: &Rtc<'_>,
-        triggers: &mut WakeTriggers,
-        _sleep_config: &mut RtcSleepConfig,
-    ) {
-        triggers.set_gpio(true);
-    }
-}
-
-macro_rules! uart_wakeup_impl {
-    ($num:literal) => {
-        paste::paste! {
-            #[doc = concat!("UART", $num, " wakeup source")]
-            ///
-            /// The chip can be woken up by reverting RXD for multiple cycles until the
-            /// number of rising edges is equal to or greater than the given value.
-            ///
-            /// Note that the character which triggers wakeup (and any characters before
-            /// it) will not be received by the UART after wakeup. This means that the
-            /// external device typically needs to send an extra character to trigger
-            /// wakeup before sending the data.
-            ///
-            /// After waking-up from UART, you should send some extra data through the UART
-            /// port in Active mode, so that the internal wakeup indication signal can be
-            /// cleared. Otherwise, the next UART wake-up would trigger with two less
-            /// rising edges than the configured threshold value.
-            ///
-            /// Wakeup from light sleep takes some time, so not every character sent to the
-            /// UART can be received by the application.
-            ///
-            /// This wakeup source can be used to wake up from light sleep only.
-            pub struct [< Uart $num WakeupSource >] {
-                threshold: u16,
-            }
-
-            impl [< Uart $num WakeupSource >] {
-                #[doc = concat!("Create a new instance of UART", $num, " wakeup source>") ]
-                ///
-                /// # Panics
-                ///
-                /// Panics if `threshold` is out of bounds.
-                pub fn new(threshold: u16) -> Self {
-                    if threshold > 1023 {
-                        panic!("Invalid threshold");
-                    }
-                    Self { threshold }
-                }
-            }
-
-            impl WakeSource for [< Uart $num WakeupSource >] {
-                fn apply(&self, _rtc: &Rtc<'_>, triggers: &mut WakeTriggers, _sleep_config: &mut RtcSleepConfig) {
-                    triggers.[< set_uart $num >](true);
-                    let uart = crate::peripherals::[< UART $num >]::regs();
-
-                    #[cfg(any(esp32, esp32s2, esp32s3, esp32c2, esp32c3))]
-                    uart.sleep_conf()
-                        .modify(|_, w| unsafe { w.active_threshold().bits(self.threshold) });
-
-                    #[cfg(not(any(esp32, esp32s2, esp32s3, esp32c2, esp32c3)))]
-                    uart.sleep_conf2().modify(|_, w| unsafe {
-                        w.wk_mode_sel().bits(0);
-                        w.active_threshold().bits(self.threshold)
-                    });
+        // A sleep with no wakeup source never ends. No counter overflow ends it either.
+        let wakeup_mask = mask();
+        if wakeup_mask == 0 {
+            match kind {
+                // A refused sleep gives the same result as a rejected sleep, and light sleep does
+                // not report that case either.
+                SleepKind::Light => return,
+                SleepKind::Deep => {
+                    panic!("no wakeup source is enabled, so nothing could end the sleep")
                 }
             }
         }
-    };
+
+        let reject_mask = if allow_reject { reject_mask() } else { 0 };
+
+        sleep_uart_prepare();
+
+        // Last, because this step takes the pads away from the peripherals that drove them. The
+        // wakeup sources have their holds now, and no later step needs a pad.
+        #[cfg(sleep_deep_sleep_needs_gpio_isolation)]
+        if kind == SleepKind::Deep {
+            gpio::wakeup::isolate_pads_for_deep_sleep();
+        }
+
+        // Latch the systimer value *before* sleeping. The systimer keeps running during
+        // the sleep enter/exit sequences, so we must not advance from the post-wake
+        // value (that would count the enter/exit time twice). Instead we set an absolute
+        // target of `before + slept`, measured by the always-running LP timer.
+        let before_ticks = crate::time::implem::raw_counter();
+        let before = rtc.time_since_boot_raw();
+
+        let _uart0_sclk_guard = crate::system::ensure_uart0_sclk_enabled();
+        let rejected = {
+            // A chip can keep a guard for the length of the sleep, to restore what sleep entry
+            // changed for the sleep only. The guard must therefore outlive the wait below.
+            #[allow(clippy::let_unit_value)]
+            let _sleep_guard = config.start_sleep(wakeup_mask, reject_mask);
+            let rejected = wait_for_sleep_result();
+
+            if config.is_deep_sleep() && !rejected {
+                // The chip is entering deep sleep, and the wake resets it. Because RTC is in a
+                // slower clock domain than the CPU, the power-down can take several CPU cycles.
+                loop {
+                    core::hint::spin_loop();
+                }
+            }
+
+            rejected
+        };
+
+        config.finish_sleep();
+
+        let after = rtc.time_since_boot_raw();
+
+        let slept_us = crate::clock::rtc_ticks_to_us(after.wrapping_sub(before));
+        let slept_ticks = crate::time::implem::us_to_ticks(slept_us);
+
+        unsafe { crate::time::implem::update_counter(before_ticks + slept_ticks) };
+        sleep_uart_resume();
+
+        run_exit_hooks();
+
+        // Unlike deep sleep, light sleep does not reset the chip, so `wakeup_cause` cannot rely on
+        // the reset reason to tell whether a wakeup occurred. A rejected request is not a wakeup,
+        // and it must not name a wakeup source.
+        // https://github.com/espressif/esp-idf/blob/a45d713b03fd96d8805d1cc116f02a4415b360c7/components/esp_hw_support/sleep_modes.c#L2158
+        if !config.is_deep_sleep() && !rejected {
+            super::LIGHT_SLEEP_WAKEUP.store(true, portable_atomic::Ordering::Relaxed);
+        }
+
+        // Last, because this call reads the wakeup cause, and after a light sleep the cause is
+        // available only after the line above.
+        gpio::wakeup::record_wakeup();
+    }
 }
 
-uart_wakeup_impl!(0);
-uart_wakeup_impl!(1);
-
-#[cfg(esp32s2)]
-bitfield::bitfield! {
-    /// Represents the wakeup triggers.
-    #[derive(Default, Clone, Copy)]
-    pub struct WakeTriggers(u16);
-    impl Debug;
-    /// EXT0 GPIO wakeup
-    pub ext0, set_ext0: 0;
-    /// EXT1 GPIO wakeup
-    pub ext1, set_ext1: 1;
-    /// GPIO wakeup (l5ght sleep only)
-    pub gpio, set_gpio: 2;
-    /// Timer wakeup
-    pub timer, set_timer: 3;
-    /// WiFi SoC wakeup
-    pub wifi_soc, set_wifi_soc: 5;
-    /// UART0 wakeup (light sleep only)
-    pub uart0, set_uart0: 6;
-    /// UART1 wakeup (light sleep only)
-    pub uart1, set_uart1: 7;
-    /// Touch wakeup
-    pub touch, set_touch: 8;
-    /// ULP-FSM or ULP-RISCV wakeup
-    pub ulp, set_ulp: 11;
-    /// ULP-RISCV trap wakeup
-    pub ulp_riscv_trap, set_ulp_riscv_trap: 13;
-    /// USB wakeup
-    pub usb, set_usb: 15;
+/// Waits for the hardware to report the result of the sleep request, and returns whether the
+/// hardware rejected the request.
+///
+/// A deep sleep powers the CPU down inside this loop, and a light sleep stops the CPU here until a
+/// wakeup source ends the sleep. A rejected request does neither, so the reject interrupt is the
+/// only report of that case. ESP-IDF waits in the same place, in `rtc_sleep_start` and in
+/// `pmu_sleep_start`.
+#[cfg(sleep_driver_supported)]
+fn wait_for_sleep_result() -> bool {
+    loop {
+        cfg_select! {
+            soc_has_pmu => {
+                let int_raw = crate::peripherals::PMU::regs().int_raw().read();
+                if int_raw.soc_wakeup().bit_is_set() || int_raw.soc_sleep_reject().bit_is_set() {
+                    return int_raw.soc_sleep_reject().bit_is_set();
+                }
+            }
+            _ => {
+                let int_raw = LPWR::regs().int_raw().read();
+                if int_raw.slp_wakeup().bit_is_set() || int_raw.slp_reject().bit_is_set() {
+                    return int_raw.slp_reject().bit_is_set();
+                }
+            }
+        }
+    }
 }
 
-#[cfg(esp32s3)]
-bitfield::bitfield! {
-    /// Represents the wakeup triggers.
-    #[derive(Default, Clone, Copy)]
-    pub struct WakeTriggers(u16);
-    impl Debug;
-    /// EXT0 GPIO wakeup
-    pub ext0, set_ext0: 0;
-    /// EXT1 GPIO wakeup
-    pub ext1, set_ext1: 1;
-    /// GPIO wakeup (light sleep only)
-    pub gpio, set_gpio: 2;
-    /// Timer wakeup
-    pub timer, set_timer: 3;
-    /// SDIO wakeup (light sleep only)
-    pub sdio, set_sdio: 4;
-    /// MAC wakeup (light sleep only)
-    pub mac, set_mac: 5;
-    /// UART0 wakeup (light sleep only)
-    pub uart0, set_uart0: 6;
-    /// UART1 wakeup (light sleep only)
-    pub uart1, set_uart1: 7;
-    /// Touch wakeup
-    pub touch, set_touch: 8;
-    /// ULP-FSM wakeup
-    pub ulp_fsm, set_ulp_fsm: 9;
-    /// BT wakeup (light sleep only)
-    pub bt, set_bt: 10;
-    /// ULP-RISCV wakeup
-    pub ulp_riscv, set_ulp_riscv: 11;
-    /// ULP-RISCV trap wakeup
-    pub ulp_riscv_trap, set_ulp_riscv_trap: 13;
+#[cfg(sleep_driver_supported)]
+fn sleep_uart_prepare() {
+    use crate::uart::Instance;
+    for_each_uart! {
+        ($id:literal, $inst:ident, $peri:ident, $rxd:ident, $txd:ident, $cts:ident, $rts:ident, wakeup_source = $_:literal) => {
+            unsafe {
+                crate::peripherals::$inst::steal().info().suspend_for_sleep();
+            }
+        };
+    }
 }
 
-#[cfg(any(esp32, esp32c2, esp32c3))]
-bitfield::bitfield! {
-    /// Represents the wakeup triggers.
-    #[derive(Default, Clone, Copy)]
-    pub struct WakeTriggers(u16);
-    impl Debug;
-    /// EXT0 GPIO wakeup
-    pub ext0, set_ext0: 0;
-    /// EXT1 GPIO wakeup
-    pub ext1, set_ext1: 1;
-    /// GPIO wakeup (light sleep only)
-    pub gpio, set_gpio: 2;
-    /// Timer wakeup
-    pub timer, set_timer: 3;
-    /// SDIO wakeup (light sleep only)
-    pub sdio, set_sdio: 4;
-    /// MAC wakeup (light sleep only)
-    pub mac, set_mac: 5;
-    /// UART0 wakeup (light sleep only)
-    pub uart0, set_uart0: 6;
-    /// UART1 wakeup (light sleep only)
-    pub uart1, set_uart1: 7;
-    /// Touch wakeup
-    pub touch, set_touch: 8;
-    /// ULP-FSM wakeup
-    pub ulp, set_ulp: 9;
-    /// BT wakeup (light sleep only)
-    pub bt, set_bt: 10;
-}
-
-#[cfg(soc_has_pmu)]
-bitfield::bitfield! {
-    /// Represents the wakeup triggers.
-    #[derive(Default, Clone, Copy)]
-    pub struct WakeTriggers(u16);
-    impl Debug;
-
-    /// EXT0 GPIO wakeup
-    pub ext0, set_ext0: 0;
-    /// EXT1 GPIO wakeup
-    pub ext1, set_ext1: 1;
-    /// GPIO wakeup
-    pub gpio, set_gpio: 2;
-    /// WiFi beacon wakeup
-    pub wifi_beacon, set_wifi_beacon: 3;
-    /// Timer wakeup
-    pub timer, set_timer: 4;
-    /// WiFi SoC wakeup
-    pub wifi_soc, set_wifi_soc: 5;
-    /// UART0 wakeup
-    pub uart0, set_uart0: 6;
-    /// UART1 wakeup
-    pub uart1, set_uart1: 7;
-    /// SDIO wakeup
-    pub sdio, set_sdio: 8;
-    /// BT wakeup
-    pub bt, set_bt: 10;
-    /// LP core wakeup
-    pub lp_core, set_lp_core: 11;
-    /// USB wakeup
-    pub usb, set_usb: 14;
-}
-
-/// Trait representing a wakeup source.
-pub trait WakeSource {
-    /// Configures the RTC and applies the wakeup triggers.
-    fn apply(&self, rtc: &Rtc<'_>, triggers: &mut WakeTriggers, sleep_config: &mut RtcSleepConfig);
+#[cfg(sleep_driver_supported)]
+fn sleep_uart_resume() {
+    use crate::uart::Instance;
+    for_each_uart! {
+        ($id:literal, $inst:ident, $peri:ident, $rxd:ident, $txd:ident, $cts:ident, $rts:ident, wakeup_source = $_:literal) => {
+            unsafe {
+                crate::peripherals::$inst::steal().info().resume_from_sleep();
+            }
+        };
+    }
 }

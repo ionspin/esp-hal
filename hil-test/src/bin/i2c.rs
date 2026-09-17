@@ -20,10 +20,8 @@ use esp_hal::{
         Operation,
         SoftwareTimeout,
     },
-    interrupt::{
-        Priority,
-        software::{SoftwareInterrupt, SoftwareInterruptControl},
-    },
+    interrupt::Priority,
+    peripherals::FROM_CPU_INTR2,
     time,
     timer::timg::TimerGroup,
 };
@@ -31,7 +29,7 @@ use esp_rtos::embassy::InterruptExecutor;
 use hil_test::mk_static;
 
 struct Context {
-    interrupt: SoftwareInterrupt<'static, 1>,
+    interrupt: FROM_CPU_INTR2<'static>,
     i2c: I2c<'static, Blocking>,
 }
 
@@ -76,9 +74,8 @@ mod tests {
     fn init() -> Context {
         let peripherals = esp_hal::init(esp_hal::Config::default());
 
-        let sw_int = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
         let timg0 = TimerGroup::new(peripherals.TIMG0);
-        esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
+        esp_rtos::start(timg0.timer0);
         let (sda, scl) = hil_test::i2c_pins!(peripherals);
 
         // Test that the pin can be explicitly configured using Flex:
@@ -101,7 +98,7 @@ mod tests {
 
         Context {
             i2c,
-            interrupt: sw_int.software_interrupt1,
+            interrupt: peripherals.FROM_CPU_INTR2,
         }
     }
 
@@ -355,7 +352,7 @@ mod tests {
         let mut i2c = ctx.i2c.into_async();
 
         let interrupt_executor =
-            mk_static!(InterruptExecutor<1>, InterruptExecutor::new(ctx.interrupt));
+            mk_static!(InterruptExecutor<2>, InterruptExecutor::new(ctx.interrupt));
 
         let spawner = interrupt_executor.start(Priority::Priority3);
 
@@ -390,7 +387,9 @@ mod tests {
         use esp_hal::i2c::master::ClockSource;
 
         let configs = cfg_select! {
-            i2c_master_version = "3" => [ClockSource::Xtal, ClockSource::RcFast],
+            any(i2c_master_version = "3", i2c_master_version = "4") => {
+                [ClockSource::Xtal, ClockSource::RcFast]
+            }
             _ => [ClockSource::Apb, ClockSource::RefTick],
         };
 
@@ -408,22 +407,89 @@ mod tests {
         }
     }
 
+    // Verify that `force_scl_low(true)` drives SCL low, blocking all I2C
+    // clocking, and that `force_scl_low(false)` releases the line and
+    // restores normal operation.
     #[test]
-    #[cfg(esp32s3)]
-    fn test_read_cali_with_rtc_i2c() {
-        use esp_hal::{
-            i2c::rtc::{Config, I2c, Timing},
-            time::Duration,
-        };
+    fn test_force_scl_low(mut ctx: Context) {
+        ctx.i2c
+            .apply_config(
+                &Config::default().with_software_timeout(SoftwareTimeout::PerByte(
+                    time::Duration::from_millis(10),
+                )),
+            )
+            .unwrap();
+
+        ctx.i2c.force_scl_low(true);
+        assert_eq!(
+            ctx.i2c.write(DUT_ADDRESS, &[]),
+            Err(Error::Timeout),
+            "expected Timeout with SCL held low by pd_en"
+        );
+
+        ctx.i2c.force_scl_low(false);
+        ctx.i2c.apply_config(&Config::default()).unwrap();
+
+        let mut read_data = [0u8; 22];
+        ctx.i2c
+            .write_read(DUT_ADDRESS, READ_DATA_COMMAND, &mut read_data)
+            .expect("bus should work normally after releasing SCL");
+        assert_ne!(read_data, [0u8; 22]);
+    }
+
+    // Verify that `force_sda_low(true)` drives SDA low and that
+    // `force_sda_low(false)` releases the line and restores normal operation.
+    #[test]
+    fn test_force_sda_low(mut ctx: Context) {
+        ctx.i2c
+            .apply_config(
+                &Config::default().with_software_timeout(SoftwareTimeout::PerByte(
+                    time::Duration::from_millis(10),
+                )),
+            )
+            .unwrap();
+
+        ctx.i2c.force_sda_low(true);
+        let mut data = [0xFFu8; 22];
+        let result = ctx
+            .i2c
+            .write_read(DUT_ADDRESS, READ_DATA_COMMAND, &mut data);
+        // force_sda_low must have observable effect: either the
+        // transaction failed, or it "succeeded" but with all-zero data.
+        assert!(
+            result.is_err() || data == [0u8; 22],
+            "force_sda_low had no observable effect: got Ok with non-zero data {:?}",
+            data
+        );
+
+        ctx.i2c.force_sda_low(false);
+        ctx.i2c.apply_config(&Config::default()).unwrap();
+
+        let mut read_data = [0u8; 22];
+        ctx.i2c
+            .write_read(DUT_ADDRESS, READ_DATA_COMMAND, &mut read_data)
+            .expect("bus should work normally after releasing SDA");
+        assert_ne!(read_data, [0u8; 22]);
+    }
+
+    #[test]
+    #[cfg(lp_i2c_master_driver_supported)]
+    fn test_read_cali_with_lp_i2c() {
+        use esp_hal::i2c::lp_i2c::{Config, LpI2c};
 
         let peripherals = unsafe { esp_hal::peripherals::Peripherals::steal() };
 
         let (sda, scl) = hil_test::i2c_pins!(peripherals);
 
-        let config = Config::default()
-            .with_timing(Timing::standard_mode())
-            .with_timeout(Duration::from_micros(100));
-        let mut i2c = I2c::new(peripherals.RTC_I2C, config, sda, scl).unwrap();
+        // RTC_I2C has no usable default timing, it has to be spelled out.
+        let config = cfg_select! {
+            lp_i2c_master_version = "rtc_i2c" => Config::default()
+                .with_timing(esp_hal::i2c::lp_i2c::Timing::standard_mode())
+                .with_timeout(esp_hal::time::Duration::from_micros(100)),
+            _ => Config::default(),
+        };
+
+        let mut i2c = LpI2c::new(peripherals.LP_I2C0, config, sda, scl).unwrap();
 
         let mut data = [0; 22];
 

@@ -14,7 +14,7 @@ embassy-net = { version = "0.8.0", features = [
     "dns",
 ] }
 embassy-time = "0.5.1"
-embassy-sync = "0.7" # TODO: update once trouble supports 0.8
+embassy-sync = "0.8"
 esp-alloc = { path = "../../../esp-alloc" }
 esp-backtrace = { path = "../../../esp-backtrace", features = [
     "panic-handler",
@@ -33,7 +33,7 @@ esp-radio = { path = "../../../esp-radio", features = [
 ] }
 reqwless = { version = "0.14.0", default-features = false }
 static_cell = "2.1.0"
-trouble-host = { version = "0.6.0", features = [
+trouble-host = { version = "0.7.0", features = [
     "default-packet-pool-mtu-255",
     "derive",
     "scan",
@@ -41,6 +41,7 @@ trouble-host = { version = "0.6.0", features = [
 
 [features]
 esp32 = [
+    "esp-alloc/esp32",
     "esp-backtrace/esp32",
     "esp-bootloader-esp-idf/esp32",
     "esp-hal/esp32",
@@ -48,6 +49,7 @@ esp32 = [
     "esp-radio/esp32",
 ]
 esp32c2 = [
+    "esp-alloc/esp32c2",
     "esp-backtrace/esp32c2",
     "esp-bootloader-esp-idf/esp32c2",
     "esp-hal/esp32c2",
@@ -55,6 +57,7 @@ esp32c2 = [
     "esp-radio/esp32c2",
 ]
 esp32c3 = [
+    "esp-alloc/esp32c3",
     "esp-backtrace/esp32c3",
     "esp-bootloader-esp-idf/esp32c3",
     "esp-hal/esp32c3",
@@ -62,6 +65,7 @@ esp32c3 = [
     "esp-radio/esp32c3",
 ]
 esp32c5 = [
+    "esp-alloc/esp32c5",
     "esp-backtrace/esp32c5",
     "esp-bootloader-esp-idf/esp32c5",
     "esp-hal/esp32c5",
@@ -69,6 +73,7 @@ esp32c5 = [
     "esp-radio/esp32c5",
 ]
 esp32c6 = [
+    "esp-alloc/esp32c6",
     "esp-backtrace/esp32c6",
     "esp-bootloader-esp-idf/esp32c6",
     "esp-hal/esp32c6",
@@ -76,6 +81,7 @@ esp32c6 = [
     "esp-radio/esp32c6",
 ]
 esp32c61 = [
+    "esp-alloc/esp32c61",
     "esp-backtrace/esp32c61",
     "esp-bootloader-esp-idf/esp32c61",
     "esp-hal/esp32c61",
@@ -83,6 +89,7 @@ esp32c61 = [
     "esp-radio/esp32c61",
 ]
 esp32s3 = [
+    "esp-alloc/esp32s3",
     "esp-backtrace/esp32s3",
     "esp-bootloader-esp-idf/esp32s3",
     "esp-hal/esp32s3",

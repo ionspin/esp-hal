@@ -7,7 +7,7 @@
 use core::fmt::{Debug, Display, Formatter, Result as FmtResult};
 
 type InnerRate = fugit::Rate<u32, 1, 1>;
-type InnerInstant = fugit::Instant<u64, 1, 1_000_000>;
+type InnerInstant = fugit::Instant<u64, 1, 1_000_000, fugit::kind::Monotonic>;
 type InnerDuration = fugit::Duration<u64, 1, 1_000_000>;
 
 /// Represents a rate or frequency of events.
@@ -45,9 +45,9 @@ impl defmt::Format for Rate {
 
 impl Rate {
     #[procmacros::doc_replace]
-    /// Shorthand for creating a rate which represents hertz.
+    /// Creates a new rate that represents hertz.
     ///
-    /// ## Example
+    /// # Examples
     ///
     /// ```rust, no_run
     /// # {before_snippet}
@@ -61,9 +61,9 @@ impl Rate {
     }
 
     #[procmacros::doc_replace]
-    /// Shorthand for creating a rate which represents kilohertz.
+    /// Creates a new rate that represents kilohertz.
     ///
-    /// ## Example
+    /// # Examples
     ///
     /// ```rust, no_run
     /// # {before_snippet}
@@ -77,9 +77,9 @@ impl Rate {
     }
 
     #[procmacros::doc_replace]
-    /// Shorthand for creating a rate which represents megahertz.
+    /// Creates a new rate that represents megahertz.
     ///
-    /// ## Example
+    /// # Examples
     ///
     /// ```rust, no_run
     /// # {before_snippet}
@@ -93,9 +93,9 @@ impl Rate {
     }
 
     #[procmacros::doc_replace]
-    /// Convert the `Rate` to an integer number of Hz.
+    /// Converts the `Rate` to an integer number of Hz.
     ///
-    /// ## Example
+    /// # Examples
     ///
     /// ```rust, no_run
     /// # {before_snippet}
@@ -110,9 +110,9 @@ impl Rate {
     }
 
     #[procmacros::doc_replace]
-    /// Convert the `Rate` to an integer number of kHz.
+    /// Converts the `Rate` to an integer number of kHz.
     ///
-    /// ## Example
+    /// # Examples
     ///
     /// ```rust, no_run
     /// # {before_snippet}
@@ -127,9 +127,9 @@ impl Rate {
     }
 
     #[procmacros::doc_replace]
-    /// Convert the `Rate` to an integer number of MHz.
+    /// Converts the `Rate` to an integer number of MHz.
     ///
-    /// ## Example
+    /// # Examples
     ///
     /// ```rust, no_run
     /// # {before_snippet}
@@ -144,9 +144,9 @@ impl Rate {
     }
 
     #[procmacros::doc_replace]
-    /// Convert the `Rate` to a `Duration`.
+    /// Converts the `Rate` to a `Duration`.
     ///
-    /// ## Example
+    /// # Examples
     ///
     /// ```rust, no_run
     /// # {before_snippet}
@@ -246,15 +246,15 @@ impl Instant {
     )]
     /// Returns the current instant.
     ///
-    /// The counter won’t measure time in sleep-mode.
+    /// The counter does not measure time in sleep mode.
     ///
-    /// The timer has a 1 microsecond resolution and will wrap after __wrap_after__.
+    /// The timer has a 1 microsecond resolution and wraps after __wrap_after__.
     ///
     /// <section class="warning">
-    /// Note that this function returns an unreliable value before <code>esp_hal::init()</code> is
-    /// called. </section>
+    /// Returns an unreliable value before <code>esp_hal::init()</code> is called.
+    /// </section>
     ///
-    /// ## Example
+    /// # Examples
     ///
     /// ```rust, no_run
     /// # {before_snippet}
@@ -275,7 +275,7 @@ impl Instant {
     #[procmacros::doc_replace]
     /// Returns the elapsed `Duration` since boot.
     ///
-    /// ## Example
+    /// # Examples
     ///
     /// ```rust, no_run
     /// # {before_snippet}
@@ -292,7 +292,7 @@ impl Instant {
     #[procmacros::doc_replace]
     /// Returns the elapsed `Duration` since this `Instant` was created.
     ///
-    /// ## Example
+    /// # Examples
     ///
     /// ```rust, no_run
     /// # {before_snippet}
@@ -328,8 +328,7 @@ impl core::ops::Sub for Instant {
 
     #[inline]
     fn sub(self, rhs: Self) -> Self::Output {
-        // Avoid "Sub failed! Other > self" panics
-        Duration::from_micros(self.0.ticks().wrapping_sub(rhs.0.ticks()))
+        Duration(self.0 - rhs.0)
     }
 }
 
@@ -397,9 +396,9 @@ impl Duration {
     pub const MAX: Self = Self(InnerDuration::from_ticks(u64::MAX));
 
     #[procmacros::doc_replace]
-    /// Creates a duration which represents microseconds.
+    /// Creates a new duration that represents microseconds.
     ///
-    /// ## Example
+    /// # Examples
     ///
     /// ```rust, no_run
     /// # {before_snippet}
@@ -409,13 +408,13 @@ impl Duration {
     /// ```
     #[inline]
     pub const fn from_micros(val: u64) -> Self {
-        Self(InnerDuration::micros(val))
+        Self(InnerDuration::from_micros(val))
     }
 
     #[procmacros::doc_replace]
-    /// Creates a duration which represents milliseconds.
+    /// Creates a new duration that represents milliseconds.
     ///
-    /// ## Example
+    /// # Examples
     ///
     /// ```rust, no_run
     /// # {before_snippet}
@@ -425,13 +424,13 @@ impl Duration {
     /// ```
     #[inline]
     pub const fn from_millis(val: u64) -> Self {
-        Self(InnerDuration::millis(val))
+        Self(InnerDuration::from_millis(val))
     }
 
     #[procmacros::doc_replace]
-    /// Creates a duration which represents seconds.
+    /// Creates a new duration that represents seconds.
     ///
-    /// ## Example
+    /// # Examples
     ///
     /// ```rust, no_run
     /// # {before_snippet}
@@ -441,13 +440,13 @@ impl Duration {
     /// ```
     #[inline]
     pub const fn from_secs(val: u64) -> Self {
-        Self(InnerDuration::secs(val))
+        Self(InnerDuration::from_secs(val))
     }
 
     #[procmacros::doc_replace]
-    /// Creates a duration which represents minutes.
+    /// Creates a new duration that represents minutes.
     ///
-    /// ## Example
+    /// # Examples
     ///
     /// ```rust, no_run
     /// # {before_snippet}
@@ -457,13 +456,13 @@ impl Duration {
     /// ```
     #[inline]
     pub const fn from_minutes(val: u64) -> Self {
-        Self(InnerDuration::minutes(val))
+        Self(InnerDuration::from_minutes(val))
     }
 
     #[procmacros::doc_replace]
-    /// Creates a duration which represents hours.
+    /// Creates a new duration that represents hours.
     ///
-    /// ## Example
+    /// # Examples
     ///
     /// ```rust, no_run
     /// # {before_snippet}
@@ -473,16 +472,16 @@ impl Duration {
     /// ```
     #[inline]
     pub const fn from_hours(val: u64) -> Self {
-        Self(InnerDuration::hours(val))
+        Self(InnerDuration::from_hours(val))
     }
 
     delegate::delegate! {
         #[inline]
         to self.0 {
             #[procmacros::doc_replace]
-            /// Convert the `Duration` to an integer number of microseconds.
+            /// Converts the `Duration` to an integer number of microseconds.
             ///
-            /// ## Example
+            /// # Examples
             ///
             /// ```rust, no_run
             /// # {before_snippet}
@@ -491,13 +490,12 @@ impl Duration {
             /// let micros = duration.as_micros();
             /// # {after_snippet}
             /// ```
-            #[call(to_micros)]
             pub const fn as_micros(&self) -> u64;
 
             #[procmacros::doc_replace]
-            /// Convert the `Duration` to an integer number of milliseconds.
+            /// Converts the `Duration` to an integer number of milliseconds.
             ///
-            /// ## Example
+            /// # Examples
             ///
             /// ```rust, no_run
             /// # {before_snippet}
@@ -506,13 +504,12 @@ impl Duration {
             /// let millis = duration.as_millis();
             /// # {after_snippet}
             /// ```
-            #[call(to_millis)]
             pub const fn as_millis(&self) -> u64;
 
             #[procmacros::doc_replace]
-            /// Convert the `Duration` to an integer number of seconds.
+            /// Converts the `Duration` to an integer number of seconds.
             ///
-            /// ## Example
+            /// # Examples
             ///
             /// ```rust, no_run
             /// # {before_snippet}
@@ -521,13 +518,12 @@ impl Duration {
             /// let secs = duration.as_secs();
             /// # {after_snippet}
             /// ```
-            #[call(to_secs)]
             pub const fn as_secs(&self) -> u64;
 
             #[procmacros::doc_replace]
-            /// Convert the `Duration` to an integer number of minutes.
+            /// Converts the `Duration` to an integer number of minutes.
             ///
-            /// ## Example
+            /// # Examples
             ///
             /// ```rust, no_run
             /// # {before_snippet}
@@ -536,13 +532,12 @@ impl Duration {
             /// let minutes = duration.as_minutes();
             /// # {after_snippet}
             /// ```
-            #[call(to_minutes)]
             pub const fn as_minutes(&self) -> u64;
 
             #[procmacros::doc_replace]
-            /// Convert the `Duration` to an integer number of hours.
+            /// Converts the `Duration` to an integer number of hours.
             ///
-            /// ## Example
+            /// # Examples
             ///
             /// ```rust, no_run
             /// # {before_snippet}
@@ -551,15 +546,14 @@ impl Duration {
             /// let hours = duration.as_hours();
             /// # {after_snippet}
             /// ```
-            #[call(to_hours)]
             pub const fn as_hours(&self) -> u64;
         }
     }
 
     #[procmacros::doc_replace]
-    /// Add two durations while checking for overflow.
+    /// Adds two durations while checking for overflow.
     ///
-    /// ## Example
+    /// # Examples
     ///
     /// ```rust, no_run
     /// # {before_snippet}
@@ -586,7 +580,7 @@ impl Duration {
     #[procmacros::doc_replace]
     /// Subtract two durations while checking for overflow.
     ///
-    /// ## Example
+    /// # Examples
     ///
     /// ```rust, no_run
     /// # {before_snippet}
@@ -611,9 +605,9 @@ impl Duration {
     }
 
     #[procmacros::doc_replace]
-    /// Add two durations, returning the maximum value if overflow occurred.
+    /// Adds two durations, returning the maximum value if overflow occurred.
     ///
-    /// ## Example
+    /// # Examples
     ///
     /// ```rust, no_run
     /// # {before_snippet}
@@ -637,7 +631,7 @@ impl Duration {
     /// Subtract two durations, returning the minimum value if the result would
     /// be negative.
     ///
-    /// ## Example
+    /// # Examples
     ///
     /// ```rust, no_run
     /// # {before_snippet}
@@ -792,13 +786,31 @@ pub(crate) mod implem {
         // value we stage the new 64-bit count in the load registers and then
         // trigger a software reload, which copies the staged value into the
         // counter immediately.
+        //
+        // A manual `LACTLOAD` while the timer is running (`en = 1`) is silently
+        // dropped when executed from the AppCpu, leaving the monotonic clock stuck
+        // (this is why the post-light-sleep time correction is lost on AppCpu). We
+        // therefore disable the timer around the load (preserving the divider) and
+        // re-enable it afterwards, mirroring `time_init`. Callers run this with
+        // interrupts disabled and the other core parked, so the brief disable is
+        // safe from concurrent reads.
         let tg0 = TIMG0::regs();
+
+        let divider = tg0.lactconfig().read().divider().bits();
+        tg0.lactconfig().write(|w| unsafe { w.bits(0) });
 
         tg0.lactloadhi()
             .write(|w| unsafe { w.load_hi().bits((counter >> 32) as u32) });
         tg0.lactloadlo()
             .write(|w| unsafe { w.load_lo().bits(counter as u32) });
         tg0.lactload().write(|w| unsafe { w.load().bits(1) });
+
+        tg0.lactconfig().write(|w| {
+            unsafe { w.divider().bits(divider) };
+            w.increase().bit(true);
+            w.autoreload().bit(true);
+            w.en().bit(true)
+        });
     }
 }
 

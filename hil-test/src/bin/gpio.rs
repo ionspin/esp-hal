@@ -6,7 +6,7 @@
 
 #![no_std]
 #![no_main]
-#![cfg_attr(esp32s2, feature(asm_experimental_arch))]
+#![cfg_attr(all(esp32s2, feature = "unstable"), feature(asm_experimental_arch))]
 
 use esp_hal::gpio::{AnyPin, Input, InputConfig, Level, Output, OutputConfig, Pin, Pull};
 use hil_test as _;
@@ -14,8 +14,11 @@ use hil_test as _;
 cfg_select! {
     feature = "unstable" => {
         use core::cell::RefCell;
+
         use critical_section::Mutex;
         use embassy_time::{Duration, Timer};
+        #[cfg(multi_core)]
+        use esp_hal::system::Stack;
         use esp_hal::{
             // OutputOpenDrain is here because will be unused otherwise
             delay::Delay,
@@ -23,6 +26,8 @@ cfg_select! {
             handler,
             timer::timg::TimerGroup,
         };
+        #[cfg(multi_core)]
+        use hil_test::mk_static;
         use portable_atomic::{AtomicUsize, Ordering};
 
         static COUNTER: Mutex<RefCell<u32>> = Mutex::new(RefCell::new(0));
@@ -51,10 +56,13 @@ struct Context {
     io: Io<'static>,
     #[cfg(all(dedicated_gpio_driver_supported, feature = "unstable"))]
     dedicated_gpio: DedicatedGpio<'static>,
-    #[cfg(all(dedicated_gpio_driver_supported, multi_core, feature = "unstable"))]
-    int1: esp_hal::interrupt::software::SoftwareInterrupt<'static, 1>,
-    #[cfg(all(dedicated_gpio_driver_supported, multi_core, feature = "unstable"))]
+
+    #[cfg(feature = "unstable")]
+    int1: esp_hal::peripherals::FROM_CPU_INTR2<'static>,
+    #[cfg(all(multi_core, feature = "unstable"))]
     cpu_ctrl: esp_hal::peripherals::CPU_CTRL<'static>,
+    #[cfg(all(multi_core, feature = "unstable"))]
+    app_core_stack: &'static mut Stack<4096>,
 }
 
 #[cfg_attr(feature = "unstable", handler)]
@@ -150,26 +158,12 @@ mod tests {
         let io = Io::new(peripherals.IO_MUX);
 
         #[cfg(feature = "unstable")]
-        #[cfg_attr(
-            any(single_core, not(dedicated_gpio_driver_supported)),
-            expect(unused_variables)
-        )]
         let int1 = {
-            let sw_int = esp_hal::interrupt::software::SoftwareInterruptControl::new(
-                peripherals.SW_INTERRUPT,
-            );
             // Timers are unstable
             let timg0 = TimerGroup::new(peripherals.TIMG0);
-            let int0 = sw_int.software_interrupt0;
-            let int1 = sw_int.software_interrupt1;
-            esp_rtos::start(timg0.timer0, int0);
-            int1
+            esp_rtos::start(timg0.timer0);
+            peripherals.FROM_CPU_INTR2
         };
-
-        #[cfg(all(dedicated_gpio_driver_supported, feature = "unstable"))]
-        let dedicated_gpio = DedicatedGpio::new(peripherals.GPIO_DEDICATED);
-        #[cfg(all(dedicated_gpio_driver_supported, multi_core, feature = "unstable"))]
-        let cpu_ctrl = peripherals.CPU_CTRL;
 
         Context {
             test_gpio1: gpio1.degrade(),
@@ -179,11 +173,13 @@ mod tests {
             #[cfg(feature = "unstable")]
             io,
             #[cfg(all(dedicated_gpio_driver_supported, feature = "unstable"))]
-            dedicated_gpio,
-            #[cfg(all(dedicated_gpio_driver_supported, multi_core, feature = "unstable"))]
+            dedicated_gpio: DedicatedGpio::new(peripherals.GPIO_DEDICATED),
+            #[cfg(feature = "unstable")]
             int1,
-            #[cfg(all(dedicated_gpio_driver_supported, multi_core, feature = "unstable"))]
-            cpu_ctrl,
+            #[cfg(all(multi_core, feature = "unstable"))]
+            cpu_ctrl: peripherals.CPU_CTRL,
+            #[cfg(all(multi_core, feature = "unstable"))]
+            app_core_stack: mk_static!(Stack<4096>, Stack::new()),
         }
     }
 
@@ -372,6 +368,57 @@ mod tests {
         test_gpio1.unlisten();
     }
 
+    // https://github.com/esp-rs/esp-hal/issues/5881
+    #[test]
+    #[cfg(all(feature = "unstable", multi_core))] // Interrupts are unstable
+    async fn gpio_interrupt_enabled_on_other_core(mut ctx: Context) {
+        let io_set_up = &*mk_static!(Signal::<CriticalSectionRawMutex, ()>, Signal::new());
+
+        esp_rtos::start_second_core(ctx.cpu_ctrl, ctx.app_core_stack, move || {
+            // Set the interrupt handler for GPIO.
+            ctx.io.set_interrupt_handler(interrupt_handler);
+            io_set_up.signal(());
+        });
+
+        // Wait for the second core to set up the interrupt handler.
+        io_set_up.wait().await;
+
+        let mut test_gpio1 =
+            Input::new(ctx.test_gpio1, InputConfig::default().with_pull(Pull::Down));
+        let mut test_gpio2 = Output::new(ctx.test_gpio2, Level::Low, OutputConfig::default());
+
+        critical_section::with(|cs| {
+            *COUNTER.borrow_ref_mut(cs) = 0;
+            test_gpio1.listen(Event::AnyEdge);
+            INPUT_PIN.borrow_ref_mut(cs).replace(test_gpio1);
+        });
+        test_gpio2.set_high();
+        ctx.delay.delay_millis(1);
+        test_gpio2.set_low();
+        ctx.delay.delay_millis(1);
+        test_gpio2.set_high();
+        ctx.delay.delay_millis(1);
+        test_gpio2.set_low();
+        ctx.delay.delay_millis(1);
+        test_gpio2.set_high();
+        ctx.delay.delay_millis(1);
+        test_gpio2.set_low();
+        ctx.delay.delay_millis(1);
+        test_gpio2.set_high();
+        ctx.delay.delay_millis(1);
+        test_gpio2.set_low();
+        ctx.delay.delay_millis(1);
+        test_gpio2.set_high();
+        ctx.delay.delay_millis(1);
+
+        let count = critical_section::with(|cs| *COUNTER.borrow_ref(cs));
+        assert_eq!(count, 9);
+
+        let mut test_gpio1 =
+            critical_section::with(|cs| INPUT_PIN.borrow_ref_mut(cs).take().unwrap());
+        test_gpio1.unlisten();
+    }
+
     #[test]
     #[cfg(feature = "unstable")] // Interrupts are unstable
     async fn unlisten_in_interrupt_handler_does_not_panic(mut ctx: Context) {
@@ -488,6 +535,44 @@ mod tests {
         assert_eq!(test_gpio2.is_set_low(), true);
     }
 
+    #[test]
+    #[cfg(all(feature = "unstable", lp_io_driver_supported))]
+    fn creating_a_driver_releases_the_hold_of_a_pad(mut ctx: Context) {
+        let probe = Input::new(
+            ctx.test_gpio2.reborrow(),
+            InputConfig::default().with_pull(Pull::None),
+        );
+
+        // A program that held the pad while it drove a high level.
+        {
+            let mut pin = Flex::new(ctx.test_gpio1.reborrow());
+            pin.apply_output_config(&OutputConfig::default());
+            pin.set_output_enable(true);
+            pin.set_high();
+
+            pin.set_pad_hold(true);
+            assert!(pin.is_pad_held(), "the pad does not report its hold");
+
+            pin.set_low();
+            ctx.delay.delay_millis(1);
+            assert_eq!(
+                probe.level(),
+                Level::High,
+                "the hold does not keep the level of the pad"
+            );
+        }
+
+        let mut pin = Flex::new(ctx.test_gpio1.reborrow());
+        pin.apply_output_config(&OutputConfig::default());
+        pin.set_output_enable(true);
+        pin.set_low();
+
+        assert!(!pin.is_pad_held(), "the pad still reports a hold");
+
+        ctx.delay.delay_millis(1);
+        assert_eq!(probe.level(), Level::Low, "the pad is still held");
+    }
+
     // Tests touch pin (GPIO2) as AnyPin and Output
     // https://github.com/esp-rs/esp-hal/issues/1943
     #[test]
@@ -518,7 +603,7 @@ mod tests {
 
     #[cfg(esp32)]
     #[test]
-    fn can_configure_rtcio_pins_as_input() {
+    fn can_configure_lp_io_pins_as_input() {
         let pin = unsafe { esp_hal::peripherals::GPIO37::steal() };
 
         _ = Input::new(pin, InputConfig::default().with_pull(Pull::Down));
@@ -527,14 +612,12 @@ mod tests {
     #[test]
     #[cfg(feature = "unstable")]
     fn interrupt_executor_is_not_frozen(ctx: Context) {
-        use esp_hal::interrupt::{Priority, software::SoftwareInterrupt};
+        use esp_hal::interrupt::Priority;
         use esp_rtos::embassy::InterruptExecutor;
         use static_cell::StaticCell;
 
-        static INTERRUPT_EXECUTOR: StaticCell<InterruptExecutor<1>> = StaticCell::new();
-        let interrupt_executor = INTERRUPT_EXECUTOR.init(InterruptExecutor::new(unsafe {
-            SoftwareInterrupt::<1>::steal()
-        }));
+        static INTERRUPT_EXECUTOR: StaticCell<InterruptExecutor<2>> = StaticCell::new();
+        let interrupt_executor = INTERRUPT_EXECUTOR.init(InterruptExecutor::new(ctx.int1));
 
         let spawner = interrupt_executor.start(Priority::max());
 
@@ -591,14 +674,11 @@ mod tests {
         // exact number of edge transitions.
 
         use esp_hal::{
-            interrupt::software::SoftwareInterruptControl,
-            peripherals::{CPU_CTRL, SW_INTERRUPT},
+            peripherals::CPU_CTRL,
             system::{Cpu, CpuControl, Stack},
         };
         use esp_rtos::embassy::Executor;
         use hil_test::mk_static;
-
-        let sw_int = unsafe { SoftwareInterruptControl::new(SW_INTERRUPT::steal()) };
 
         let mut out_pin = Output::new(ctx.test_gpio2, Level::Low, OutputConfig::default());
         let in_pin = Input::new(ctx.test_gpio1, InputConfig::default().with_pull(Pull::Down));
@@ -610,17 +690,12 @@ mod tests {
         const CORE1_STACK_SIZE: usize = 8192;
         let app_core_stack = mk_static!(Stack<CORE1_STACK_SIZE>, Stack::new());
 
-        esp_rtos::start_second_core(
-            unsafe { CPU_CTRL::steal() },
-            sw_int.software_interrupt1,
-            app_core_stack,
-            move || {
-                let executor = mk_static!(Executor, Executor::new());
-                executor.run(|spawner| {
-                    spawner.spawn(edge_counter_task(in_pin, input_pin_listening).unwrap());
-                });
-            },
-        );
+        esp_rtos::start_second_core(unsafe { CPU_CTRL::steal() }, app_core_stack, move || {
+            let executor = mk_static!(Executor, Executor::new());
+            executor.run(|spawner| {
+                spawner.spawn(edge_counter_task(in_pin, input_pin_listening).unwrap());
+            });
+        });
 
         // Now drive the OutputPin and assert that the other core saw exactly as many
         // edges as we generated here.
@@ -643,26 +718,40 @@ mod tests {
     #[test]
     #[cfg(all(dedicated_gpio_driver_supported, feature = "unstable"))]
     fn dedicated_gpios(ctx: Context) {
+        fn settle() {
+            #[cfg(esp32s2)]
+            unsafe {
+                core::arch::asm!("nop");
+                core::arch::asm!("nop");
+                core::arch::asm!("nop");
+                core::arch::asm!("nop");
+            }
+        }
         let input = Input::new(ctx.test_gpio1, InputConfig::default().with_pull(Pull::Down));
         let output = Output::new(ctx.test_gpio2, Level::Low, OutputConfig::default());
 
         let input_dedicated = DedicatedGpioInput::new(ctx.dedicated_gpio.channel0.input, input);
-        let mut output_dedicated =
-            DedicatedGpioOutput::new(ctx.dedicated_gpio.channel0.output).with_pin(output);
+        let mut output_dedicated = DedicatedGpioOutput::new(ctx.dedicated_gpio.channel0.output);
 
-        // output_dedicated.set_level(Level::Low);
+        // There is no pin connected. We can change the output level, but it only sets some internal
+        // state.
         assert_eq!(input_dedicated.level(), Level::Low);
         assert_eq!(output_dedicated.output_level(), Level::Low);
         output_dedicated.set_level(Level::High);
-        #[cfg(esp32s2)]
-        unsafe {
-            core::arch::asm!("nop");
-            core::arch::asm!("nop");
-            core::arch::asm!("nop");
-            core::arch::asm!("nop");
-        }
+        settle();
+        assert_eq!(output_dedicated.output_level(), Level::High);
+        assert_eq!(input_dedicated.level(), Level::Low);
+
+        // Connect pin and observe its state changing without calling `set_level`.
+        let mut output_dedicated = output_dedicated.with_pin(output);
+        settle();
         assert_eq!(input_dedicated.level(), Level::High);
         assert_eq!(output_dedicated.output_level(), Level::High);
+
+        output_dedicated.set_level(Level::Low);
+        settle();
+        assert_eq!(input_dedicated.level(), Level::Low);
+        assert_eq!(output_dedicated.output_level(), Level::Low);
     }
 
     #[test]
@@ -687,19 +776,15 @@ mod tests {
         debug_assertions
     ))]
     async fn dedicated_gpio_different_cores_panics(ctx: Context) {
-        use esp_hal::system::Stack;
-        use hil_test::mk_static;
-
         let pin1 = ctx.test_gpio1;
         let driver_signal = &*mk_static!(
             Signal<CriticalSectionRawMutex, DedicatedGpioInput<'static>>,
             Signal::new()
         );
-        let app_core_stack = mk_static!(Stack<4096>, Stack::new());
 
         // creating the driver at core1, and then use it at core
         // this should panic
-        esp_rtos::start_second_core(ctx.cpu_ctrl, ctx.int1, app_core_stack, move || {
+        esp_rtos::start_second_core(ctx.cpu_ctrl, ctx.app_core_stack, move || {
             let input = Input::new(pin1, InputConfig::default().with_pull(Pull::Down));
             let driver = DedicatedGpioInput::new(ctx.dedicated_gpio.channel1.input, input);
 
@@ -797,5 +882,57 @@ mod tests {
             output_bundle,
         );
         output_bundle.set_low(0b10); // should panic, only channel0 is configured
+    }
+
+    #[cfg(all(ulp_riscv_driver_supported, feature = "unstable"))]
+    fn no_init() {}
+
+    #[test(init = no_init)]
+    #[cfg(all(ulp_riscv_driver_supported, feature = "unstable"))]
+    fn creating_lpio_does_not_panic() {
+        let peripherals = esp_hal::init(esp_hal::Config::default());
+
+        // Do not use JTAG or USB Serial/JTAG pins because they break the tests.
+        let debug_pins = cfg_select!(
+            esp32 => [13, 14, 15, 16],
+            any(esp32c2, esp32c3) => [4, 5],
+            esp32s3 => [19, 20],
+            _ => [],
+        );
+
+        esp_metadata_generated::for_each_lp_function! {
+            (($_lp:ident, LP_GPIOn, $pin:literal), $gpio:ident, $_af:ident, $_lp_in:tt $_lp_out:tt) => {
+                if !debug_pins.contains(&$pin) {
+                    esp_hal::gpio::Input::new(
+                        peripherals.$gpio,
+                        esp_hal::gpio::InputConfig::default(),
+                    )
+                    .into_lp::<$pin>()
+                    .unwrap();
+                }
+            };
+        }
+    }
+}
+
+#[allow(unused, reason = "Compile tests")]
+#[cfg(spi_master_driver_supported)] // unimportant, one device is enough to check the API
+mod compile_regression_tests {
+    use esp_hal::{
+        Blocking,
+        gpio::{InputPin, OutputPin},
+        spi::master::Spi,
+    };
+
+    fn pin_traits_imply_peripheral_signals() {
+        // The interconnect module is not stable, meaning users can't name `PeripheralInput`.
+        // `InputPin` must therefore imply `PeripheralInput` to allow generic code. This is done by
+        // a blanket implementation, which must be preserved despite the subpar documentation.
+        fn input_pin_generic_user_function(spi: Spi<'_, Blocking>, p: impl InputPin) {
+            spi.with_miso(p);
+        }
+        fn output_pin_generic_user_function(spi: Spi<'_, Blocking>, p: impl OutputPin) {
+            spi.with_mosi(p);
+        }
     }
 }

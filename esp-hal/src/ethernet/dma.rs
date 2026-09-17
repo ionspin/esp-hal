@@ -1,7 +1,7 @@
 //! EMAC DMA descriptor rings.
 //!
 //! Implements the chained-ring descriptor layout for the Synopsys DesignWare
-//! GMAC as found on ESP32 and ESP32-P4. The driver always uses the **enhanced
+//! GMAC as found on ESP32, ESP32-P4, and ESP32-S31. The driver always uses the **enhanced
 //! 32-byte descriptor format** (`ALT_DESC_SIZE = 1` in `EMAC_DMA.dmabusmode`).
 
 use core::sync::atomic::{Ordering, fence};
@@ -12,6 +12,8 @@ use crate::{dma::aligned::InternalMemory, reg_access::VolatileCell};
 pub const MAX_FRAME_SIZE: usize = 1524;
 /// Minimum accepted RX frame length.
 pub const MIN_RX_FRAME_SIZE: usize = 14;
+
+const TX_CHECKSUM_OFFLOAD: bool = property!("ethernet.tx_checksum_offload");
 
 // ── TDES bits ──────────────────────────────────────────────────────────────
 
@@ -25,6 +27,11 @@ pub const TDES0_LS: u32 = 1 << 29;
 pub const TDES0_FS: u32 = 1 << 28;
 /// TX second-address-chained mode (next descriptor pointer in TDES3).
 pub const TDES0_CHAINED: u32 = 1 << 20;
+/// TX checksum insertion control (`CIC`) shift. `0b11` inserts IPv4 header and
+/// TCP/UDP/ICMP payload checksums including the pseudo-header.
+pub const TDES0_CIC_SHIFT: u32 = 22;
+/// Full Type-2 TX checksum insertion (`CIC = 0b11`).
+pub const TDES0_CIC_FULL: u32 = 0b11 << TDES0_CIC_SHIFT;
 
 // ── RDES bits ──────────────────────────────────────────────────────────────
 
@@ -45,6 +52,28 @@ pub const RDES0_LS: u32 = 1 << 8;
 pub const RDES1_BUF1_SIZE_MASK: u32 = 0x1fff;
 /// RX second-address-chained bit.
 pub const RDES1_CHAINED: u32 = 1 << 14;
+
+// ── RDES4 extended-status bits (Type-2 checksum offload) ─────────────────────
+//
+// Only consumed when RX COE is enabled (`ethernet.rx_checksum_offload`).
+
+cfg_select! {
+    ethernet_rx_checksum_offload => {
+        /// RDES0 extended-status-available bit: RDES4 holds valid COE status.
+        pub const RDES0_ESA: u32 = 1 << 0;
+        /// RDES4: IP header checksum error.
+        pub const RDES4_IP_HEADER_ERROR: u32 = 1 << 3;
+        /// RDES4: IP payload (TCP/UDP/ICMP) checksum error.
+        pub const RDES4_IP_PAYLOAD_ERROR: u32 = 1 << 4;
+        /// RDES4: IP checksum offload engine was bypassed (checksum not verified).
+        pub const RDES4_IP_CHECKSUM_BYPASSED: u32 = 1 << 5;
+        /// RDES4: IPv4 packet received.
+        pub const RDES4_IPV4_PACKET: u32 = 1 << 6;
+        /// RDES4: IPv6 packet received.
+        pub const RDES4_IPV6_PACKET: u32 = 1 << 7;
+    }
+    _ => {}
+}
 
 // ── Descriptor types ────────────────────────────────────────────────────────
 
@@ -111,10 +140,20 @@ impl TDes {
         self.tdes0.set(self.tdes0.get() | TDES0_CHAINED);
     }
 
+    /// Marks the descriptor as a complete frame of `len` bytes.
+    ///
+    /// Checksum insertion (`CIC`) follows `ethernet.tx_checksum_offload`. The
+    /// MAC can only insert a payload checksum with transmit store-and-forward,
+    /// which is enabled together with that property.
     fn set_len_and_flags(&mut self, len: usize) {
         self.tdes1.set(len as u32 & RDES1_BUF1_SIZE_MASK);
+        let cic = if TX_CHECKSUM_OFFLOAD {
+            TDES0_CIC_FULL
+        } else {
+            0
+        };
         self.tdes0
-            .set((self.tdes0.get() & TDES0_CHAINED) | TDES0_FS | TDES0_LS | TDES0_IC);
+            .set((self.tdes0.get() & TDES0_CHAINED) | TDES0_FS | TDES0_LS | TDES0_IC | cic);
     }
 
     fn set_buffer_addr(&mut self, addr: *const u8) {
@@ -135,7 +174,12 @@ pub struct RDes {
     pub(super) rdes1: VolatileCell<u32>,
     pub(super) buf_addr: VolatileCell<u32>,
     pub(super) next_desc: VolatileCell<u32>,
-    _rdes4: VolatileCell<u32>,
+    // Extended status; the GMAC writes IP checksum-offload results here.
+    #[cfg_attr(
+        not(ethernet_rx_checksum_offload),
+        allow(dead_code, reason = "only read when RX checksum offload is enabled")
+    )]
+    rdes4: VolatileCell<u32>,
     _rdes5: VolatileCell<u32>,
     _rdes6: VolatileCell<u32>,
     _rdes7: VolatileCell<u32>,
@@ -149,7 +193,7 @@ impl RDes {
             rdes1: VolatileCell::new(0),
             buf_addr: VolatileCell::new(0),
             next_desc: VolatileCell::new(0),
-            _rdes4: VolatileCell::new(0),
+            rdes4: VolatileCell::new(0),
             _rdes5: VolatileCell::new(0),
             _rdes6: VolatileCell::new(0),
             _rdes7: VolatileCell::new(0),
@@ -184,6 +228,30 @@ impl RDes {
 
     fn frame_len(&self) -> usize {
         ((self.rdes0.get() & RDES0_FL_MASK) >> RDES0_FL_SHIFT) as usize
+    }
+
+    /// Returns whether the hardware IP checksum-offload engine flagged a
+    /// header or payload checksum error for this frame.
+    ///
+    /// These results live in the extended-status word (RDES4) rather than in
+    /// `RDES0_ES`, so they must be inspected explicitly. Only meaningful on the
+    /// last descriptor of a frame. Non-IP frames (e.g. ARP) and frames whose
+    /// checksum the engine bypassed never report an error.
+    #[cfg(ethernet_rx_checksum_offload)]
+    fn checksum_error(&self) -> bool {
+        // The extended status is only valid when RDES0[0] (ESA) is set.
+        if self.rdes0.get() & RDES0_ESA == 0 {
+            return false;
+        }
+
+        let ext = self.rdes4.get();
+
+        // The COE status bits only apply to IPv4/IPv6 frames.
+        let is_ip = ext & (RDES4_IPV4_PACKET | RDES4_IPV6_PACKET) != 0;
+        // If the engine bypassed the checksum, there is nothing to reject.
+        let bypassed = ext & RDES4_IP_CHECKSUM_BYPASSED != 0;
+
+        is_ip && !bypassed && ext & (RDES4_IP_HEADER_ERROR | RDES4_IP_PAYLOAD_ERROR) != 0
     }
 
     fn configure_buffer(&mut self, size: usize) {
@@ -223,7 +291,7 @@ impl<const RX: usize, const TX: usize> Default for EthernetDmaStorage<RX, TX> {
 }
 
 impl<const RX: usize, const TX: usize> EthernetDmaStorage<RX, TX> {
-    /// Creates a zero-initialized storage block, suitable for `static` placement.
+    /// Creates a new zero-initialized storage block, suitable for `static` placement.
     pub const fn new() -> Self {
         Self {
             rx_descs: [const { InternalMemory::new(RDes::new_zeroed()) }; RX],
@@ -266,6 +334,10 @@ impl<'a> TDesRing<'a> {
         ring
     }
 
+    pub(crate) fn len(&self) -> usize {
+        self.descriptors.len()
+    }
+
     /// Rebuilds ring links and returns all descriptors to CPU ownership.
     ///
     /// Call once after `EMAC_DMA` soft-reset completes and before starting TX.
@@ -296,7 +368,7 @@ impl<'a> TDesRing<'a> {
 
     /// Copies `frame` into the next available TX buffer and hands it to DMA.
     ///
-    /// Returns `Err(DescriptorError::RingFull)` if no CPU-owned slot is available
+    /// Returns `Err(DescriptorError::RingFull)` if no CPU-owned slot is available.
     /// and `Err(DescriptorError::FrameTooLarge)` if the frame exceeds [`MAX_FRAME_SIZE`].
     pub fn transmit(&mut self, frame: &[u8]) -> Result<(), TxError> {
         if frame.len() > MAX_FRAME_SIZE {
@@ -312,7 +384,7 @@ impl<'a> TDesRing<'a> {
         }
     }
 
-    /// Returns `true` if the current slot is CPU-owned (ready to accept a frame).
+    /// Returns whether the current slot is CPU-owned (ready to accept a frame).
     pub fn has_capacity(&self) -> bool {
         let desc = self.descriptors[self.index].get_ref();
         #[cfg(soc_internal_memory_cached)]
@@ -321,10 +393,11 @@ impl<'a> TDesRing<'a> {
         desc.owned_by() == OwnedBy::Cpu
     }
 
-    /// Returns a mutable reference to the current TX DMA buffer if the slot is
-    /// CPU-owned, enabling zero-copy frame construction.
+    /// Returns a mutable reference to the current TX DMA buffer when the slot is
+    /// CPU-owned, which enables zero-copy frame construction.
     ///
     /// After writing the frame, call [`TDesRing::commit`] to hand it to DMA.
+    /// Returns `None` when the slot is not CPU-owned.
     pub fn available_buf(&mut self) -> Option<&mut [u8; MAX_FRAME_SIZE]> {
         if self.has_capacity() {
             let idx = self.index;
@@ -424,7 +497,7 @@ impl<'a> RDesRing<'a> {
         self.descriptors[0].as_ptr()
     }
 
-    /// Returns a mutable data slice if a frame is ready.
+    /// Returns a mutable data slice for a ready frame, or `None` when no frame is ready.
     ///
     /// Loops past error/incomplete/oversized frames, recycling them back to DMA
     /// automatically. Returns `None` only when no CPU-owned descriptor remains.
@@ -450,7 +523,14 @@ impl<'a> RDesRing<'a> {
                 let is_complete = desc.is_complete_frame();
                 let frame_len = desc.frame_len();
 
-                if status & RDES0_ES != 0 || !is_complete {
+                // When RX COE is on, checksum errors are reported in RDES4
+                // rather than `RDES0_ES`.
+                let checksum_bad = cfg_select! {
+                    ethernet_rx_checksum_offload => desc.checksum_error(),
+                    _ => false,
+                };
+
+                if status & RDES0_ES != 0 || !is_complete || checksum_bad {
                     None
                 } else {
                     // Strip the 4-byte FCS the GMAC appends to the frame length.

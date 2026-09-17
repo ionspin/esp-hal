@@ -17,7 +17,7 @@
 use esp_rom_sys::rom::{ets_delay_us, ets_update_cpu_frequency_rom};
 
 use crate::{
-    peripherals::{APB_CTRL, I2C_ANA_MST, I2C0, LPWR, SPI2, SYSTEM, TIMG0, TIMG1, UART0, UART1},
+    peripherals::{APB_CTRL, I2C_ANA_MST, LPWR, SYSTEM, TIMG0, TIMG1},
     soc::regi2c,
     time::Rate,
 };
@@ -252,6 +252,7 @@ fn enable_rc_fast_clk_impl(_clocks: &mut ClockTree, en: bool) {
 
 // XTAL32K_CLK
 
+#[cfg(use_xtal32k)]
 fn enable_xtal32k_clk_impl(_clocks: &mut ClockTree, en: bool) {
     // RTCIO could be configured to allow an external oscillator to be used. We could model this
     // with a MUX, probably, but this is omitted for now for simplicity.
@@ -487,6 +488,7 @@ fn configure_rtc_slow_clk_impl(
     LPWR::regs().clk_conf().modify(|_, w| unsafe {
         // TODO: variants should be in PAC
         w.ana_clk_rtc_sel().bits(match new_config {
+            #[cfg(use_xtal32k)]
             RtcSlowClkConfig::Xtal32k => 1,
             RtcSlowClkConfig::RcSlow => 0,
             RtcSlowClkConfig::RcFast => 2,
@@ -535,8 +537,12 @@ fn configure_low_power_clk_impl(
             .bit(new_config == LowPowerClkConfig::RtcSlow);
         w.lpclk_sel_xtal()
             .bit(new_config == LowPowerClkConfig::Xtal);
-        w.lpclk_sel_xtal32k()
-            .bit(new_config == LowPowerClkConfig::Xtal32k)
+        w.lpclk_sel_xtal32k().bit({
+            cfg_select! {
+                use_xtal32k => new_config == LowPowerClkConfig::Xtal32k,
+                _ => false,
+            }
+        })
     });
 }
 
@@ -575,11 +581,21 @@ fn configure_timg_calibration_clock_impl(
         w.rtc_cali_clk_sel().bits(match new_config {
             TimgCalibrationClockConfig::RcSlowClk => 0,
             TimgCalibrationClockConfig::RcFastDivClk => 1,
+            #[cfg(use_xtal32k)]
             TimgCalibrationClockConfig::Xtal32kClk => 2,
         })
     });
 }
 
+impl SdmInstance {
+    // SDM_FUNCTION_CLOCK
+
+    fn enable_function_clock_impl(self, _clocks: &mut ClockTree, en: bool) {
+        crate::peripherals::GPIO_SD::regs()
+            .sigmadelta_misc()
+            .modify(|_, w| w.function_clk_en().bit(en));
+    }
+}
 impl RmtInstance {
     // RMT_SCLK
 
@@ -659,116 +675,6 @@ impl TimgInstance {
         regs.wdtconfig0().modify(|_, w| {
             w.wdt_use_xtal()
                 .bit(new_config == TimgWdtClockConfig::XtalClk)
-        });
-    }
-}
-
-impl UartInstance {
-    // UART_FUNCTION_CLOCK
-
-    fn enable_function_clock_impl(self, _clocks: &mut ClockTree, en: bool) {
-        let regs = match self {
-            UartInstance::Uart0 => UART0::regs(),
-            UartInstance::Uart1 => UART1::regs(),
-        };
-        regs.clk_conf().modify(|_, w| w.sclk_en().bit(en));
-    }
-
-    fn configure_function_clock_impl(
-        self,
-        _clocks: &mut ClockTree,
-        _old_config: Option<UartFunctionClockConfig>,
-        new_config: UartFunctionClockConfig,
-    ) {
-        let regs = match self {
-            UartInstance::Uart0 => UART0::regs(),
-            UartInstance::Uart1 => UART1::regs(),
-        };
-        regs.clk_conf().modify(|_, w| unsafe {
-            w.sclk_sel().bits(match new_config.sclk {
-                UartFunctionClockSclk::Apb => 1,
-                UartFunctionClockSclk::RcFast => 2,
-                UartFunctionClockSclk::Xtal => 3,
-            });
-            w.sclk_div_num().bits(new_config.div_num as _)
-        });
-    }
-
-    // UART_MEM_CLOCK
-
-    fn enable_mem_clock_impl(self, _clocks: &mut ClockTree, _en: bool) {
-        // Nothing to do.
-    }
-
-    fn configure_mem_clock_impl(
-        self,
-        _clocks: &mut ClockTree,
-        _old_config: Option<UartMemClockConfig>,
-        _new_config: UartMemClockConfig,
-    ) {
-        // Nothing to do.
-    }
-
-    // UART_BAUD_RATE_GENERATOR
-
-    fn enable_baud_rate_generator_impl(self, _clocks: &mut ClockTree, _en: bool) {
-        // Nothing to do.
-    }
-
-    fn configure_baud_rate_generator_impl(
-        self,
-        _clocks: &mut ClockTree,
-        _old_config: Option<UartBaudRateGeneratorConfig>,
-        new_config: UartBaudRateGeneratorConfig,
-    ) {
-        let regs = match self {
-            UartInstance::Uart0 => UART0::regs(),
-            UartInstance::Uart1 => UART1::regs(),
-        };
-        regs.clkdiv().write(|w| unsafe {
-            w.clkdiv().bits(new_config.integral as _);
-            w.frag().bits(new_config.fractional as _)
-        });
-    }
-}
-
-impl I2cInstance {
-    // I2C_FUNCTION_CLOCK
-
-    fn enable_function_clock_impl(self, _clocks: &mut ClockTree, en: bool) {
-        I2C0::regs()
-            .clk_conf()
-            .modify(|_, w| w.sclk_active().bit(en));
-    }
-
-    fn configure_function_clock_impl(
-        self,
-        _clocks: &mut ClockTree,
-        _old_config: Option<I2cFunctionClockConfig>,
-        new_config: I2cFunctionClockConfig,
-    ) {
-        I2C0::regs().clk_conf().modify(|_, w| unsafe {
-            w.sclk_sel()
-                .bit(matches!(new_config.sclk, I2cFunctionClockSclk::RcFast));
-            w.sclk_div_num().bits(new_config.div_num as _)
-        });
-    }
-}
-
-impl SpiInstance {
-    // SPI_FUNCTION_CLOCK
-
-    fn enable_function_clock_impl(self, _clocks: &mut ClockTree, _en: bool) {}
-
-    fn configure_function_clock_impl(
-        self,
-        _clocks: &mut ClockTree,
-        _old_config: Option<SpiFunctionClockConfig>,
-        new_config: SpiFunctionClockConfig,
-    ) {
-        SPI2::regs().clk_gate().modify(|_, w| {
-            w.mst_clk_sel()
-                .bit(matches!(new_config, SpiFunctionClockConfig::Pll80m))
         });
     }
 }

@@ -10,11 +10,7 @@ use embassy_futures::{join::join, select::select};
 use embassy_time::Timer;
 use esp_alloc as _;
 use esp_backtrace as _;
-use esp_hal::{
-    clock::CpuClock,
-    interrupt::software::SoftwareInterruptControl,
-    timer::timg::TimerGroup,
-};
+use esp_hal::{clock::CpuClock, timer::timg::TimerGroup};
 use esp_radio::ble::controller::BleConnector;
 use log::{info, warn};
 use trouble_host::prelude::*;
@@ -27,8 +23,7 @@ async fn main(_s: Spawner) {
     let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
     esp_alloc::heap_allocator!(size: 72 * 1024);
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    let sw_int = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
-    esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
+    esp_rtos::start(timg0.timer0);
 
     let bluetooth = peripherals.BT;
     let connector = BleConnector::new(bluetooth, Default::default()).unwrap();
@@ -70,14 +65,13 @@ where
     let address: Address = Address::random([0xff, 0x8f, 0x1a, 0x05, 0xe4, 0xff]);
     info!("Our address = {:?}", address);
 
-    let mut resources: HostResources<DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> =
+    let mut resources: HostResources<_, DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> =
         HostResources::new();
-    let stack = trouble_host::new(controller, &mut resources).set_random_address(address);
-    let Host {
-        mut peripheral,
-        runner,
-        ..
-    } = stack.build();
+    let stack = trouble_host::new(controller, &mut resources)
+        .set_random_address(address)
+        .build();
+    let runner = stack.runner();
+    let mut peripheral = stack.peripheral();
 
     info!("Starting advertising and GATT service");
     let server = Server::new_with_config(GapConfig::Peripheral(PeripheralConfig {
@@ -152,12 +146,12 @@ async fn gatt_events_task<P: PacketPool>(
                         }
                     }
                     GattEvent::Write(event) => {
-                        if event.handle() == level.handle {
+                        event.with_data(|offset, data| {
                             info!(
-                                "[gatt] Write Event to Level Characteristic: {:?}",
-                                event.data()
-                            );
-                        }
+                                "[gatt] Write Event to Level Characteristic at {}: {:?}",
+                                offset, data
+                            )
+                        });
                     }
                     _ => {}
                 };
@@ -185,7 +179,7 @@ async fn advertise<'values, 'server, C: Controller>(
     let len = AdStructure::encode_slice(
         &[
             AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
-            AdStructure::ServiceUuids16(&[[0x0f, 0x18]]),
+            AdStructure::IncompleteServiceUuids16(&[[0x0f, 0x18]]),
             AdStructure::CompleteLocalName(name.as_bytes()),
         ],
         &mut advertiser_data[..],
@@ -219,7 +213,7 @@ async fn custom_task<C: Controller, P: PacketPool>(
     loop {
         tick = tick.wrapping_add(1);
         info!("[custom_task] notifying connection of tick {}", tick);
-        if level.notify(conn, &tick).await.is_err() {
+        if level.notify(conn, &tick, true).await.is_err() {
             info!("[custom_task] error notifying connection");
             break;
         };

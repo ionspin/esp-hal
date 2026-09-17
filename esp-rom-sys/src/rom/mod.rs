@@ -4,9 +4,9 @@
 //!
 //! For some selected ROM functions safe wrappers are provided for convenience.
 
-#[cfg(any(rom_crc_be, rom_crc_le))]
+#[cfg(any(rom_has_crc_be, rom_has_crc_le))]
 pub mod crc;
-#[cfg(any(rom_md5_bsd, rom_md5_mbedtls))]
+#[cfg(any(rom_has_md5_bsd, rom_has_md5_mbedtls))]
 pub mod md5;
 pub mod spiflash;
 
@@ -62,7 +62,7 @@ pub fn software_reset() -> ! {
 }
 
 /// Set App cpu Entry code, code can be called in PRO CPU.
-#[cfg(any(esp32s3, esp32p4))]
+#[cfg(any(esp32s3, esp32p4, esp32s31))]
 #[inline(always)]
 pub fn ets_set_appcpu_boot_addr(boot_addr: u32) {
     unsafe extern "C" {
@@ -77,7 +77,7 @@ pub fn ets_set_appcpu_boot_addr(boot_addr: u32) {
 #[unsafe(no_mangle)]
 extern "C" fn rtc_clk_xtal_freq_get() -> i32 {
     cfg_select! {
-        any(esp32c6, esp32h2, esp32p4) => {
+        any(esp32c6, esp32h2, esp32p4, esp32s31) => {
             unsafe extern "C" {
                 fn ets_clk_get_xtal_freq() -> i32;
             }

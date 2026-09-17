@@ -39,8 +39,9 @@ pub const PLACEHOLDER: &str = "{{currentVersion}}";
 #[derive(Debug, Subcommand)]
 pub enum Release {
     /// Create a release plan. This is the first step in the release process.
-    /// Accepts zero or more package names. If no package names are
-    /// specified, all packages are included.
+    /// The plan always covers every published package; use `--exclude` to leave
+    /// specific packages out (along with any dependency that becomes private to
+    /// the excluded set).
     ///
     /// The result of this command is a json file that can be customized to
     /// control what and how gets released.
@@ -81,8 +82,8 @@ pub enum Release {
     Publish(PublishArgs),
     /// Generate git tags for all new package releases.
     TagReleases(TagReleasesArgs),
-    /// Update the MSRV (Badges in README.md, "rust-version" in Cargo.toml, the
-    /// toolchain used in CI)
+    /// Update the MSRV (Badges in README.md, "rust-version" in Cargo.toml). CI
+    /// derives its MSRV toolchain from esp-hal's "rust-version".
     #[cfg(feature = "release")]
     BumpMsrv(bump_msrv::BumpMsrvArgs),
 }

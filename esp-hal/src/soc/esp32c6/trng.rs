@@ -1,5 +1,5 @@
 use crate::{
-    peripherals::{APB_SARADC, PCR, PMU},
+    peripherals::{APB_SARADC, PCR},
     soc::regi2c,
 };
 
@@ -8,11 +8,10 @@ const SAR2_ATTEN: u32 = 1;
 const SAR1_ATTEN: u32 = 1;
 const PATTERN_BIT_WIDTH: u32 = 6;
 
-/// Enable true randomness by enabling the entropy source.
+/// Enables true randomness by enabling the entropy source.
 /// Blocks `ADC` usage.
 pub(crate) fn ensure_randomness() {
     let pcr = PCR::regs();
-    let pmu = PMU::regs();
     let apb_saradc = APB_SARADC::regs();
 
     unsafe {
@@ -38,12 +37,6 @@ pub(crate) fn ensure_randomness() {
         // changed)
         pcr.saradc_clkm_conf()
             .modify(|_, w| w.saradc_clkm_div_num().bits(0));
-
-        // some ADC sensor registers are in power group PERIF_I2C and need to be enabled
-        // via PMU
-        pmu.rf_pwc().modify(|_, w| w.perif_i2c_rstb().set_bit());
-
-        pmu.rf_pwc().modify(|_, w| w.xpd_perif_i2c().set_bit());
 
         // Config ADC circuit (Analog part) with I2C(HOST ID 0x69) and chose internal
         // voltage as sampling source
@@ -80,7 +73,7 @@ pub(crate) fn ensure_randomness() {
     }
 }
 
-/// Disable true randomness. Unlocks `ADC` peripheral.
+/// Disables true randomness. Unlocks `ADC` peripheral.
 pub(crate) fn revert_trng() {
     unsafe {
         APB_SARADC::regs()

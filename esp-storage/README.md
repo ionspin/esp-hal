@@ -6,19 +6,8 @@
 ![Crates.io](https://img.shields.io/crates/l/esp-storage?labelColor=1C2C2E&style=flat-square)
 [![Matrix](https://img.shields.io/matrix/esp-rs:matrix.org?label=join%20matrix&labelColor=1C2C2E&color=BEC5C9&logo=matrix&style=flat-square)](https://matrix.to/#/#esp-rs:matrix.org)
 
-This crate provides functionality to access unencrypted ESP32 flash. Enable the
+This crate provides functionality to access ESP32 flash. Enable the
 `embedded-storage` feature for [`embedded-storage`](https://github.com/rust-embedded-community/embedded-storage) trait implementations.
-
-## Important
-
-For ESP32 it is necessary to build with [optimization level](https://doc.rust-lang.org/cargo/reference/profiles.html#opt-level) 2 or 3.
-
-To make it work also for `debug` builds add this to your `Cargo.toml`
-
-```toml
-[profile.dev.package.esp-storage]
-opt-level = 3
-```
 
 ## Minimum Supported Rust Version (MSRV)
 

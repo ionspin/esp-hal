@@ -1,6 +1,8 @@
 use strum::FromRepr;
 
-pub(crate) fn init() {}
+use crate::soc::clocks::ClockConfig;
+
+pub(crate) fn init(_config: &ClockConfig) {}
 
 // Terminology:
 //
@@ -13,7 +15,7 @@ pub(crate) fn init() {}
 /// SOC Reset Reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, FromRepr)]
 pub enum SocResetReason {
-    /// Power on reset
+    /// Powers on reset.
     ///
     /// In ESP-IDF this value (0x01) can *also* be `ChipBrownOut` or
     /// `ChipSuperWdt`, however that is not really compatible with Rust-style
@@ -35,7 +37,7 @@ pub enum SocResetReason {
     Cpu0Sw        = 0x0C,
     /// RTC watch dog resets CPU 0
     Cpu0RtcWdt    = 0x0D,
-    /// VDD voltage is not stable and resets the digital core
+    /// VDD voltage is not stable and resets the digital core.
     SysBrownOut   = 0x0F,
     /// RTC watch dog resets digital core and rtc module
     SysRtcWdt     = 0x10,

@@ -9,6 +9,7 @@
 //!   - ESP32, ESP32-S2, ESP32-S3: GPIO0
 //!   - ESP32-C5: GPIO28
 //!   - ESP32-P4: GPIO35
+//!   - ESP32-S31: GPIO61
 //!   - Others: GPIO9
 
 //% CHIP_FILTER: gpio_driver_supported
@@ -43,12 +44,14 @@ fn main() -> ! {
 
     let mut led = Output::new(peripherals.GPIO2, Level::Low, OutputConfig::default());
 
-    let button = cfg_select! {
-        any(feature = "esp32", feature = "esp32s2", feature = "esp32s3") => peripherals.GPIO0,
-        feature = "esp32c5" => peripherals.GPIO28,
-        feature = "esp32p4" => peripherals.GPIO35,
-        _ => peripherals.GPIO9,
-    };
+    let button =
+        cfg_select! {
+            any(feature = "esp32", feature = "esp32s2", feature = "esp32s3") => peripherals.GPIO0,
+            feature = "esp32c5" => peripherals.GPIO28,
+            feature = "esp32p4" => peripherals.GPIO35,
+            feature = "esp32s31" => peripherals.GPIO61,
+            _ => peripherals.GPIO9,
+        };
 
     let config = InputConfig::default().with_pull(Pull::Up);
     let mut button = Input::new(button, config);

@@ -442,7 +442,7 @@ macro_rules! pins {
 }
 
 cfg_select! {
-    any(esp32, esp32s3) => {
+    any(esp32, esp32s3, esp32s31, esp32p4) => {
         macro_rules! rx_channel_creator {
             ($rmt:expr) => {
                 $rmt.channel4
@@ -461,6 +461,9 @@ cfg_select! {
 struct Context {
     rmt: RMT<'static>,
     pin: AnyPin<'static>,
+
+    #[cfg(esp32)]
+    pin2: AnyPin<'static>,
 }
 
 impl Context {
@@ -516,18 +519,17 @@ mod tests {
 
         esp_alloc::heap_allocator!(#[ram(reclaimed)] size: 64 * 1024);
 
-        let software_interrupt =
-            esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
-
         let timg0 = TimerGroup::new(peripherals.TIMG0);
 
-        esp_rtos::start(timg0.timer0, software_interrupt.software_interrupt0);
+        esp_rtos::start(timg0.timer0);
 
-        let pin = AnyPin::from(hil_test::common_test_pins!(peripherals).1);
+        let (pin, _pin2) = hil_test::common_test_pins!(peripherals);
 
         Context {
             rmt: peripherals.RMT,
-            pin,
+            pin: AnyPin::from(pin),
+            #[cfg(esp32)]
+            pin2: AnyPin::from(_pin2),
         }
     }
 
@@ -904,7 +906,7 @@ mod tests {
         }
 
         // Chips with separate Rx and Tx channels
-        #[cfg(esp32s3)]
+        #[cfg(any(esp32s3, esp32s31, esp32p4))]
         {
             test_channel_pair!(ctx, channel0, channel4);
             test_channel_pair!(ctx, channel1, channel5);
@@ -912,7 +914,7 @@ mod tests {
             test_channel_pair!(ctx, channel3, channel7);
         }
 
-        #[cfg(not(any(esp32, esp32s2, esp32s3)))]
+        #[cfg(not(any(esp32, esp32s2, esp32s3, esp32s31, esp32p4)))]
         {
             test_channel_pair!(ctx, channel0, channel2);
             test_channel_pair!(ctx, channel1, channel3);
@@ -1122,7 +1124,7 @@ mod tests {
         for loopcount in 1..MAX_LOOP_COUNT {
             #[allow(unused_mut)]
             let mut loopmode = LoopMode::InfiniteWithInterrupt(loopcount as u16);
-            #[cfg(any(esp32c6, esp32h2, esp32s3))]
+            #[cfg(rmt_has_tx_loop_auto_stop)]
             if use_autostop {
                 loopmode = LoopMode::Finite(loopcount as u16);
             };
@@ -1183,14 +1185,14 @@ mod tests {
 
     // Test that continuous tx with a finite loopcount works as expected when using automatic
     // stopping (on devices that have the required hardware support).
-    #[cfg(any(esp32c6, esp32h2, esp32s3))]
+    #[cfg(rmt_has_tx_loop_auto_stop)]
     #[test]
     fn rmt_loopback_continuous_tx_auto_stop(ctx: Context) {
         rmt_loopback_continuous_tx_impl(ctx, true);
     }
 
     // Test that using loopcount 0 doesn't hang, but returns success immediately.
-    #[cfg(any(esp32c6, esp32h2, esp32s3))]
+    #[cfg(rmt_has_tx_loop_auto_stop)]
     #[test]
     fn rmt_continuous_tx_zero_loopcount(mut ctx: Context) {
         use esp_hal::time::Instant;
@@ -1228,5 +1230,59 @@ mod tests {
             start.elapsed().as_micros() < 1000,
             "tx with loopcount 0 did not complete immediately"
         );
+    }
+
+    // Regression test for esp-rs/esp-hal#4697
+    //
+    // This tests ESP32-specific (mis-)behavior
+    #[cfg(esp32)]
+    #[test]
+    async fn rmt_check_regression_4697(mut ctx: Context) {
+        let rmt = Rmt::new(ctx.rmt.reborrow(), FREQ).unwrap().into_async();
+
+        let (rx, tx) = (ctx.pin, ctx.pin2);
+
+        let mut rx_channel = rx_channel_creator!(rmt)
+            .configure_rx(
+                &RxChannelConfig::default()
+                    .with_clk_divider(255)
+                    .with_idle_threshold(10000),
+            )
+            .unwrap()
+            .with_pin(rx);
+
+        let mut spi = esp_hal::spi::master::Spi::new(
+            unsafe { esp_hal::peripherals::SPI2::steal() },
+            Default::default(),
+        )
+        .unwrap()
+        .with_sck(tx)
+        .into_async();
+
+        let mut buf = [0u8; 1000];
+
+        // This code is to drive the hardware into the state that caused the
+        // originally failed assertion.
+        //
+        // We are "spamming" RMT with pulses by feeding it the SPI SCK.
+        //
+        // While not really explainable from any documentation, this turned out to drive the
+        // hardware into an unexpected state.
+        //
+        // With the previous assert in place, interestingly the first two receive calls failed as
+        // expected but then we ran into the issue where the assert failed instead of seeing
+        // the error bit set.
+        embassy_futures::join::join(
+            async {
+                let mut data = [PulseCode::default(); 10];
+                for _ in 0..3 {
+                    assert!(rx_channel.receive(&mut data).await.is_err());
+                }
+            },
+            async {
+                spi.transfer_in_place_async(&mut buf).await.unwrap();
+            },
+        )
+        .await;
     }
 }

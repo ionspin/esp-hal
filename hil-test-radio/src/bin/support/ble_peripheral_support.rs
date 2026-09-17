@@ -1,4 +1,4 @@
-//% CHIP_FILTER(has_wifi_ble): esp32c6
+//% CHIP_FILTER(has_wifi_ble): esp32c6 || esp32s3
 //% SUPPORT-FIRMWARE: true
 //% FEATURES: unstable esp-alloc embassy
 //% FEATURES(has_wifi_ble): esp-radio/ble esp-radio esp-radio-unstable
@@ -10,11 +10,7 @@
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_time::{Duration, Timer};
-use esp_hal::{
-    clock::CpuClock,
-    interrupt::software::SoftwareInterruptControl,
-    timer::timg::TimerGroup,
-};
+use esp_hal::{clock::CpuClock, timer::timg::TimerGroup};
 use esp_radio::ble::controller::BleConnector;
 use hil_test as _;
 use semihosting as _;
@@ -45,11 +41,11 @@ fn init_heap() {
             use esp_hal::ram;
             esp_alloc::heap_allocator!(#[ram(reclaimed)] size: 64 * 1024);
             esp_alloc::heap_allocator!(size: 36 * 1024);
-        },
+        }
         any(esp32c5, esp32h2) => {
             esp_alloc::heap_allocator!(size: 72 * 1024);
-        },
-        _ => {},
+        }
+        _ => {}
     }
 }
 
@@ -61,8 +57,7 @@ async fn main(_spawner: Spawner) {
     let p = esp_hal::init(config);
 
     let timg0 = TimerGroup::new(p.TIMG0);
-    let sw_ints = SoftwareInterruptControl::new(p.SW_INTERRUPT);
-    esp_rtos::start(timg0.timer0, sw_ints.software_interrupt0);
+    esp_rtos::start(timg0.timer0);
 
     let connector = BleConnector::new(p.BT, Default::default()).unwrap();
     let controller: ExternalController<_, 1> = ExternalController::new(connector);
@@ -76,13 +71,13 @@ where
 {
     let address = Address::random(PERIPHERAL_ADDRESS);
 
-    let mut resources: HostResources<DefaultPacketPool, 1, 2> = HostResources::new();
-    let stack = trouble_host::new(controller, &mut resources).set_random_address(address);
-    let Host {
-        mut peripheral,
-        runner,
-        ..
-    } = stack.build();
+    let mut resources: HostResources<_, DefaultPacketPool, 1, 2> = HostResources::new();
+    let stack = trouble_host::new(controller, &mut resources)
+        .set_random_address(address)
+        .build();
+    let mut peripheral = stack.peripheral();
+    let runner = stack.runner();
+
     let server = Server::new_with_config(GapConfig::Peripheral(PeripheralConfig {
         name: DEVICE_NAME,
         appearance: &appearance::power_device::GENERIC_POWER_DEVICE,
@@ -121,7 +116,7 @@ where
     let len = AdStructure::encode_slice(
         &[
             AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
-            AdStructure::ServiceUuids16(&[[0x0f, 0x18]]),
+            AdStructure::IncompleteServiceUuids16(&[[0x0f, 0x18]]),
             AdStructure::CompleteLocalName(DEVICE_NAME.as_bytes()),
         ],
         &mut adv_data,

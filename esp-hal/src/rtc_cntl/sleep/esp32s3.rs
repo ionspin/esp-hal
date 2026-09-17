@@ -1,16 +1,7 @@
-use super::{
-    Ext0WakeupSource,
-    Ext1WakeupSource,
-    TimerWakeupSource,
-    UlpWakeupSource,
-    WakeSource,
-    WakeTriggers,
-    WakeupLevel,
-};
+use super::SleepKind;
 use crate::{
-    gpio::{RtcFunction, RtcPin},
-    peripherals::{APB_CTRL, EXTMEM, LPWR, RTC_IO, SPI0, SPI1, SYSTEM},
-    rtc_cntl::{Rtc, sleep::RtcioWakeupSource},
+    peripherals::{APB_CTRL, EXTMEM, LPWR, SPI0, SPI1, SYSTEM},
+    rtc_cntl::Rtc,
     soc::regi2c,
 };
 
@@ -51,7 +42,7 @@ pub const RTC_CNTL_MIN_SLP_VAL_MIN: u8 = 2;
 pub const RTC_CNTL_DBG_ATTEN_DEEPSLEEP_ULTRA_LOW: u8 = 15;
 /// Power-up setting for other blocks.
 pub const OTHER_BLOCKS_POWERUP: u8 = 1;
-/// Wait cycles for other blocks.
+/// Waits cycles for other blocks.
 pub const OTHER_BLOCKS_WAIT: u16 = 1;
 /// WiFi power-up cycles.
 pub const WIFI_POWERUP_CYCLES: u8 = OTHER_BLOCKS_POWERUP;
@@ -82,205 +73,6 @@ pub const RTC_MEM_POWERUP_CYCLES: u8 = OTHER_BLOCKS_POWERUP;
 /// RTC memory wait cycles.
 pub const RTC_MEM_WAIT_CYCLES: u16 = OTHER_BLOCKS_WAIT;
 
-impl WakeSource for UlpWakeupSource {
-    fn apply(
-        &self,
-        _rtc: &Rtc<'_>,
-        triggers: &mut WakeTriggers,
-        sleep_config: &mut RtcSleepConfig,
-    ) {
-        triggers.set_ulp_fsm(self.wake_on_interrupt);
-        triggers.set_ulp_riscv(self.wake_on_interrupt);
-        triggers.set_ulp_riscv_trap(self.wake_on_trap);
-
-        if self.clear_interrupts_on_sleep {
-            self.clear_interrupts();
-        }
-
-        // This one needs to be false to keep the ULP timer and ULP GPIO happy!
-        // Possibly relevant issue: https://github.com/espressif/esp-idf/issues/10595
-        sleep_config.set_rtc_peri_pd_en(false);
-    }
-}
-
-impl WakeSource for TimerWakeupSource {
-    fn apply(
-        &self,
-        rtc: &Rtc<'_>,
-        triggers: &mut WakeTriggers,
-        _sleep_config: &mut RtcSleepConfig,
-    ) {
-        triggers.set_timer(true);
-        let rtc_cntl = LPWR::regs();
-        // TODO: maybe add check to prevent overflow?
-        let ticks = crate::clock::us_to_rtc_ticks(self.duration.as_micros());
-        // "alarm" time in slow rtc ticks
-        let now = rtc.time_since_boot_raw();
-        let time_in_ticks = now + ticks;
-        unsafe {
-            rtc_cntl
-                .slp_timer0()
-                .write(|w| w.slp_val_lo().bits((time_in_ticks & 0xffffffff) as u32));
-
-            rtc_cntl
-                .int_clr()
-                .write(|w| w.main_timer().clear_bit_by_one());
-
-            rtc_cntl.slp_timer1().write(|w| {
-                w.slp_val_hi().bits(((time_in_ticks >> 32) & 0xffff) as u16);
-                w.main_timer_alarm_en().set_bit()
-            });
-        }
-    }
-}
-
-impl<P: RtcPin> WakeSource for Ext0WakeupSource<P> {
-    fn apply(
-        &self,
-        _rtc: &Rtc<'_>,
-        triggers: &mut WakeTriggers,
-        sleep_config: &mut RtcSleepConfig,
-    ) {
-        // don't power down RTC peripherals
-        sleep_config.set_rtc_peri_pd_en(false);
-        triggers.set_ext0(true);
-
-        // set pin to RTC function
-        self.pin
-            .borrow_mut()
-            .rtc_set_config(true, true, RtcFunction::Rtc);
-
-        unsafe {
-            let rtc_io = RTC_IO::regs();
-            // set pin register field
-            rtc_io
-                .ext_wakeup0()
-                .modify(|_, w| w.sel().bits(self.pin.borrow().rtc_number()));
-            // set level register field
-            let rtc_cntl = LPWR::regs();
-            rtc_cntl
-                .ext_wakeup_conf()
-                .modify(|_r, w| w.ext_wakeup0_lv().bit(self.level == WakeupLevel::High));
-        }
-    }
-}
-
-impl<P: RtcPin> Drop for Ext0WakeupSource<P> {
-    fn drop(&mut self) {
-        // should we have saved the pin configuration first?
-        // set pin back to IO_MUX (input_enable and func have no effect when pin is sent
-        // to IO_MUX)
-        self.pin
-            .borrow_mut()
-            .rtc_set_config(true, false, RtcFunction::Rtc);
-    }
-}
-
-impl WakeSource for Ext1WakeupSource<'_, '_> {
-    fn apply(
-        &self,
-        _rtc: &Rtc<'_>,
-        triggers: &mut WakeTriggers,
-        _sleep_config: &mut RtcSleepConfig,
-    ) {
-        triggers.set_ext1(true);
-
-        // set pins to RTC function
-        let mut pins = self.pins.borrow_mut();
-        let mut bits = 0u32;
-        for pin in pins.iter_mut() {
-            pin.rtc_set_config(true, true, RtcFunction::Rtc);
-            pin.rtcio_pad_hold(true);
-            bits |= 1 << pin.rtc_number();
-        }
-
-        unsafe {
-            let rtc_cntl = LPWR::regs();
-            // clear previous wakeup status
-            rtc_cntl
-                .ext_wakeup1()
-                .modify(|_, w| w.ext_wakeup1_status_clr().set_bit());
-            // set pin register field
-            rtc_cntl
-                .ext_wakeup1()
-                .modify(|_, w| w.ext_wakeup1_sel().bits(bits));
-            // set level register field
-            rtc_cntl
-                .ext_wakeup_conf()
-                .modify(|_r, w| w.ext_wakeup1_lv().bit(self.level == WakeupLevel::High));
-        }
-    }
-}
-
-impl Drop for Ext1WakeupSource<'_, '_> {
-    fn drop(&mut self) {
-        // should we have saved the pin configuration first?
-        // set pin back to IO_MUX (input_enable and func have no effect when pin is sent
-        // to IO_MUX)
-        let mut pins = self.pins.borrow_mut();
-        for pin in pins.iter_mut() {
-            pin.rtc_set_config(true, false, RtcFunction::Rtc);
-        }
-    }
-}
-
-impl RtcioWakeupSource<'_, '_> {
-    fn apply_pin(&self, pin: &mut dyn RtcPin, level: WakeupLevel) {
-        let rtcio = RTC_IO::regs();
-
-        pin.rtc_set_config(true, true, RtcFunction::Rtc);
-
-        rtcio.pin(pin.number() as usize).modify(|_, w| unsafe {
-            w.wakeup_enable().set_bit().int_type().bits(match level {
-                WakeupLevel::Low => 4,
-                WakeupLevel::High => 5,
-            })
-        });
-    }
-}
-
-impl WakeSource for RtcioWakeupSource<'_, '_> {
-    fn apply(
-        &self,
-        _rtc: &Rtc<'_>,
-        triggers: &mut WakeTriggers,
-        sleep_config: &mut RtcSleepConfig,
-    ) {
-        let mut pins = self.pins.borrow_mut();
-
-        if pins.is_empty() {
-            return;
-        }
-
-        // don't power down RTC peripherals
-        sleep_config.set_rtc_peri_pd_en(false);
-        triggers.set_gpio(true);
-
-        // Since we only use RTCIO pins, we can keep deep sleep enabled.
-        let sens = crate::peripherals::SENS::regs();
-
-        // TODO: disable clock when not in use
-        sens.sar_peri_clk_gate_conf()
-            .modify(|_, w| w.iomux_clk_en().set_bit());
-
-        for (pin, level) in pins.iter_mut() {
-            self.apply_pin(*pin, *level);
-        }
-    }
-}
-
-impl Drop for RtcioWakeupSource<'_, '_> {
-    fn drop(&mut self) {
-        // should we have saved the pin configuration first?
-        // set pin back to IO_MUX (input_enable and func have no effect when pin is sent
-        // to IO_MUX)
-        let mut pins = self.pins.borrow_mut();
-        for (pin, _level) in pins.iter_mut() {
-            pin.rtc_set_config(true, false, RtcFunction::Rtc);
-        }
-    }
-}
-
 bitfield::bitfield! {
     /// Configuration for the RTC sleep behavior.
     #[derive(Clone, Copy)]
@@ -300,7 +92,7 @@ bitfield::bitfield! {
     pub modem_pd_en, set_modem_pd_en: 5;
     /// power down CPU, but not restart when lightsleep.
     pub cpu_pd_en, set_cpu_pd_en: 6;
-    /// Power down Internal 8M oscillator
+    /// Powers down Internal 8M oscillator.
     pub int_8m_pd_en, set_int_8m_pd_en: 7;
     /// power down digital peripherals
     pub dig_peri_pd_en, set_dig_peri_pd_en: 8;
@@ -359,7 +151,7 @@ const SYSCON_ROM_POWER_UP: u8 = 0x7;
 
 fn rtc_sleep_pu(val: bool) {
     let rtc_cntl = LPWR::regs();
-    let syscon = unsafe { &*esp32s3::APB_CTRL::ptr() };
+    let syscon = APB_CTRL::regs();
     let bb = unsafe { &*esp32s3::BB::ptr() };
     let nrx = unsafe { &*esp32s3::NRX::ptr() };
     let fe = unsafe { &*esp32s3::FE::ptr() };
@@ -444,6 +236,10 @@ impl RtcSleepConfig {
         self.deep_slp()
     }
 
+    pub(crate) fn set_sleep_kind(&mut self, kind: SleepKind) {
+        self.set_deep_slp(kind == SleepKind::Deep);
+    }
+
     pub(crate) fn base_settings(_rtc: &Rtc<'_>) {
         // settings derived from esp_clk_init -> rtc_init
         unsafe {
@@ -462,10 +258,8 @@ impl RtcSleepConfig {
             rtc_cntl.ana_conf().modify(|_, w| w.pvtmon_pu().clear_bit());
 
             rtc_cntl.timer1().modify(|_, w| {
-                w.pll_buf_wait()
-                    .bits(RTC_CNTL_PLL_BUF_WAIT_DEFAULT)
-                    .ck8m_wait()
-                    .bits(RTC_CNTL_CK8M_WAIT_DEFAULT)
+                w.pll_buf_wait().bits(RTC_CNTL_PLL_BUF_WAIT_DEFAULT);
+                w.ck8m_wait().bits(RTC_CNTL_CK8M_WAIT_DEFAULT)
             });
 
             // Moved from rtc sleep to rtc init to save sleep function running time
@@ -558,12 +352,10 @@ impl RtcSleepConfig {
                 .modify(|_, w| w.xtl_force_pu().clear_bit());
 
             rtc_cntl.ana_conf().modify(|_, w| {
-                w
-                    // open sar_i2c protect function to avoid sar_i2c reset when rtc_ldo is low.
-                    // clear i2c_reset_protect pd force, need tested in low temperature.
-                    // NOTE: this bit is written again in esp-idf, but it's not clear why.
-                    .i2c_reset_por_force_pd()
-                    .clear_bit()
+                // open sar_i2c protect function to avoid sar_i2c reset when rtc_ldo is low.
+                // clear i2c_reset_protect pd force, need tested in low temperature.
+                // NOTE: this bit is written again in esp-idf, but it's not clear why.
+                w.i2c_reset_por_force_pd().clear_bit()
             });
 
             // cancel bbpll force pu if setting no force power up
@@ -621,9 +413,10 @@ impl RtcSleepConfig {
                 .dig_pwc()
                 .modify(|_, w| w.wifi_force_pu().clear_bit());
 
-            rtc_cntl
-                .dig_iso()
-                .modify(|_, w| w.bt_force_noiso().clear_bit().bt_force_iso().clear_bit());
+            rtc_cntl.dig_iso().modify(|_, w| {
+                w.bt_force_noiso().clear_bit();
+                w.bt_force_iso().clear_bit()
+            });
 
             rtc_cntl
                 .dig_pwc()
@@ -695,21 +488,18 @@ impl RtcSleepConfig {
                 w.wifi_force_noiso().clear_bit();
                 w.wifi_force_iso().clear_bit()
             });
-
-            rtc_cntl
-                .dig_pwc()
-                .modify(|_, w| w.wifi_force_pu().clear_bit().wifi_pd_en().set_bit());
         } else {
             rtc_cntl.options0().modify(|_, w| {
                 w.bbpll_force_pu().set_bit();
                 w.bbpll_i2c_force_pu().set_bit();
                 w.bb_i2c_force_pu().set_bit()
             });
-
-            rtc_cntl
-                .dig_pwc()
-                .modify(|_, w| w.wifi_force_pu().set_bit().wifi_pd_en().clear_bit());
         }
+
+        rtc_cntl.dig_pwc().modify(|_, w| {
+            w.wifi_force_pu().bit(self.modem_pd_en());
+            w.wifi_pd_en().bit(self.modem_pd_en())
+        });
 
         if self.cpu_pd_en() {
             rtc_cntl.dig_iso().modify(|_, w| {
@@ -717,9 +507,10 @@ impl RtcSleepConfig {
                 w.cpu_top_force_iso().clear_bit()
             });
 
-            rtc_cntl
-                .dig_pwc()
-                .modify(|_, w| w.cpu_top_force_pu().clear_bit().cpu_top_pd_en().set_bit());
+            rtc_cntl.dig_pwc().modify(|_, w| {
+                w.cpu_top_force_pu().clear_bit();
+                w.cpu_top_pd_en().set_bit()
+            });
         } else {
             rtc_cntl
                 .dig_pwc()
@@ -732,9 +523,10 @@ impl RtcSleepConfig {
                 w.dg_peri_force_iso().clear_bit()
             });
 
-            rtc_cntl
-                .dig_pwc()
-                .modify(|_, w| w.dg_peri_force_pu().clear_bit().dg_peri_pd_en().set_bit());
+            rtc_cntl.dig_pwc().modify(|_, w| {
+                w.dg_peri_force_pu().clear_bit();
+                w.dg_peri_pd_en().set_bit()
+            });
         } else {
             rtc_cntl
                 .dig_pwc()
@@ -835,7 +627,10 @@ impl RtcSleepConfig {
         }
     }
 
-    pub(crate) fn start_sleep(&self, wakeup_triggers: WakeTriggers) {
+    /// Configures the wakeup options and requests the sleep.
+    ///
+    /// The caller waits for the result of the request.
+    pub(crate) fn start_sleep(&self, wakeup_mask: u32, reject_mask: u32) {
         unsafe {
             LPWR::regs()
                 .reset_state()
@@ -844,7 +639,13 @@ impl RtcSleepConfig {
             // set bits for what can wake us up
             LPWR::regs()
                 .wakeup_state()
-                .modify(|_, w| w.wakeup_ena().bits(wakeup_triggers.0.into()));
+                .modify(|_, w| w.wakeup_ena().bits(wakeup_mask));
+
+            // Set the bits of the sources that reject the sleep. The reject enables that `apply`
+            // wrote arm those sources.
+            LPWR::regs()
+                .slp_reject_conf()
+                .modify(|_, w| w.sleep_reject_ena().bits(reject_mask));
 
             LPWR::regs().state0().modify(|_, w| w.sleep_en().set_bit());
         }

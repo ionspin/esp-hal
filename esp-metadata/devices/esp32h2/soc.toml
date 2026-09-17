@@ -2,7 +2,7 @@
 #
 # Empty [`device.driver`] tables imply `partial` support status.
 #
-# If you modify a driver support status, run `cargo xtask update-metadata` to
+# If you modify a driver support status, run `cargo update-metadata` to
 # update the table in the esp-hal README.
 
 [device]
@@ -10,45 +10,53 @@ name   = "esp32h2"
 arch   = "riscv"
 target = "riscv32imac-unknown-none-elf"
 cores  = 1
+datasheet = "https://www.espressif.com/sites/default/files/documentation/esp32-h2_datasheet_en.pdf"
 trm    = "https://www.espressif.com/sites/default/files/documentation/esp32-h2_technical_reference_manual_en.pdf"
 
-symbols = [
-    # Additional peripherals defined by us (the developers):
-    "phy",
-    "swd",
+[device.mmu]
+page_size = 0x10000
+entry_num = 256
 
-    # ROM capabilities
-    "rom_crc_le",
-    "rom_crc_be",
-    "rom_md5_bsd",
-]
+[device.flash]
+support_status = "partial"
+
+[device.rom]
+has_crc_le  = true
+has_crc_be  = true
+has_md5_bsd = true
 
 [device.soc]
 cpu_has_csr_pc = true
 cpu_csr_prv_mode = 0xC10
+cpu_mcause_mask = 0x1f
+
+has_swd_watchdog = true
 
 memory_map = { ranges = [
     { name = "dram", start = 0x4080_0000, end = 0x4085_0000 },
     { name = "dram2_uninit", start = 0x4083_EFD0, end = 0x4084_FEE0 },
+    { name = "irom", start = 0x4200_0000, end = 0x4300_0000 },
+    { name = "drom", start = 0x4200_0000, end = 0x4300_0000 },
 ] }
 
 peripherals = [
     { name = "AES", interrupts = { peri = "AES" } },
     { name = "APB_SARADC" },
     { name = "ASSIST_DEBUG" },
+    { name = "CLINT", hidden = true },
     { name = "DMA" },
     { name = "DS" },
     { name = "ECC" },
     { name = "EFUSE", hidden = true },
     { name = "GPIO" },
-    { name = "GPIO_SD" },
+    { name = "GPIO_SD", clock_group = "SDM" },
     { name = "HMAC" },
     { name = "HP_APM" },
     { name = "HP_SYS" },
     { name = "I2C_ANA_MST" },
     { name = "I2C0", interrupts = { peri = "I2C_EXT0" }, stable = true, clock_group = "I2C" },
     { name = "I2C1", interrupts = { peri = "I2C_EXT1" }, stable = true, clock_group = "I2C" },
-    { name = "I2S0", interrupts = { peri = "I2S0" } },
+    { name = "I2S0", interrupts = { peri = "I2S0" }, clock_group = "I2S" },
     { name = "IEEE802154", interrupts = { mac = "ZB_MAC" } },
     { name = "INTERRUPT_CORE0" },
     { name = "INTPRI" },
@@ -61,7 +69,7 @@ peripherals = [
     { name = "LP_APM0" },
     { name = "LP_CLKRST" },
     { name = "LP_PERI" },
-    { name = "LP_TIMER" },
+    { name = "RTC_TIMER", pac = "LP_TIMER" },
     { name = "LP_WDT" },
     { name = "MCPWM0", clock_group = "MCPWM" },
     { name = "MEM_MONITOR" },
@@ -70,7 +78,7 @@ peripherals = [
     { name = "OTP_DEBUG" },
     { name = "PARL_IO", interrupts = { tx = "PARL_IO_TX", rx = "PARL_IO_RX" }, clock_group = "PARL_IO" },
     { name = "PAU" },
-    { name = "PCNT" },
+    { name = "PCNT", interrupts = { peri = "PCNT" } },
     { name = "PCR" },
     { name = "PLIC_MX" },
     { name = "PMU" },
@@ -98,7 +106,10 @@ peripherals = [
     { name = "BT", virtual = true, interrupts = { mac = "BT_MAC", lp_timer = "LP_BLE_TIMER" } },
     { name = "FLASH", virtual = true },
     { name = "GPIO_DEDICATED", virtual = true },
-    { name = "SW_INTERRUPT", virtual = true },
+    { name = "FROM_CPU_INTR0", virtual = true },
+    { name = "FROM_CPU_INTR1", virtual = true },
+    { name = "FROM_CPU_INTR2", virtual = true },
+    { name = "FROM_CPU_INTR3", virtual = true },
 ]
 
 [device.soc.clocks]
@@ -177,216 +188,8 @@ has_memory_clock_gate = true
 supports_enhanced_security = true # only after revision 1.2
 
 [device.gpio]
-version = 2
-has_input_sync = true
 support_status = "supported"
-gpio_function = 1
-constant_0_input = 0x3c
-constant_1_input = 0x38
-pins = [
-    { pin =  0, functions = {             2 = "FSPIQ"   } },
-    { pin =  1, functions = {             2 = "FSPICS0" }, analog = { 1 = "ADC1_CH0" } },
-    { pin =  2, functions = { 0 = "MTMS", 2 = "FSPIWP"  }, analog = { 1 = "ADC1_CH1" } },
-    { pin =  3, functions = { 0 = "MTDI", 2 = "FSPIHD"  }, analog = { 1 = "ADC1_CH2" } },
-    { pin =  4, functions = { 0 = "MTCK", 2 = "FSPICLK" }, analog = { 1 = "ADC1_CH3" } },
-    { pin =  5, functions = { 0 = "MTDO", 2 = "FSPID"   }, analog = { 1 = "ADC1_CH4" } },
-    { pin =  6,                          limitations = ["spi_flash"] },
-    { pin =  7, lp = { 0 = "LP_GPIO0" }, limitations = ["spi_flash"] },
-    { pin =  8, lp = { 0 = "LP_GPIO1" }, limitations = ["strapping"] },
-    { pin =  9, lp = { 0 = "LP_GPIO2" }, limitations = ["strapping"] },
-    { pin = 10, lp = { 0 = "LP_GPIO3" },                   analog = { 0 = "ZCD0" } },
-    { pin = 11, lp = { 0 = "LP_GPIO4" },                   analog = { 0 = "ZCD1" } },
-    { pin = 12, lp = { 0 = "LP_GPIO5" } },
-    { pin = 13, lp = { 0 = "LP_GPIO6" },                   analog = { 0 = "XTAL_32K_P" } },
-    { pin = 14, lp = { 0 = "LP_GPIO7" },                   analog = { 0 = "XTAL_32K_N" } },
-    { pin = 22 },
-    { pin = 23, functions = { 0 = "U0RXD", 2 = "FSPICS1" } },
-    { pin = 24, functions = { 0 = "U0TXD", 2 = "FSPICS2" } },
-    { pin = 25, functions = {              2 = "FSPICS3" }, limitations = ["strapping"] },
-    { pin = 26, functions = {              2 = "FSPICS4" }, analog = { 0 = "USJ_DM" } },
-    { pin = 27, functions = {              2 = "FSPICS5" }, analog = { 0 = "USJ_DP" } },
-]
-input_signals = [
-    { name = "EXT_ADC_START",       id = 0 },
-    { name = "U0RXD",               id = 6 },
-    { name = "U0CTS",               id = 7 },
-    { name = "U0DSR",               id = 8 },
-    { name = "U1RXD",               id = 9 },
-    { name = "U1CTS",               id = 10 },
-    { name = "U1DSR",               id = 11 },
-    { name = "I2S_MCLK",            id = 12 },
-    { name = "I2SO_BCK",            id = 13 },
-    { name = "I2SO_WS",             id = 14 },
-    { name = "I2SI_SD",             id = 15 },
-    { name = "I2SI_BCK",            id = 16 },
-    { name = "I2SI_WS",             id = 17 },
-    { name = "USB_JTAG_TDO_BRIDGE", id = 19 },
-    { name = "CPU_GPIO_0",          id = 28 },
-    { name = "CPU_GPIO_1",          id = 29 },
-    { name = "CPU_GPIO_2",          id = 30 },
-    { name = "CPU_GPIO_3",          id = 31 },
-    { name = "CPU_GPIO_4",          id = 32 },
-    { name = "CPU_GPIO_5",          id = 33 },
-    { name = "CPU_GPIO_6",          id = 34 },
-    { name = "CPU_GPIO_7",          id = 35 },
-    { name = "I2CEXT0_SCL",         id = 45 },
-    { name = "I2CEXT0_SDA",         id = 46 },
-    { name = "PARL_RX_DATA0",       id = 47 },
-    { name = "PARL_RX_DATA1",       id = 48 },
-    { name = "PARL_RX_DATA2",       id = 49 },
-    { name = "PARL_RX_DATA3",       id = 50 },
-    { name = "PARL_RX_DATA4",       id = 51 },
-    { name = "PARL_RX_DATA5",       id = 52 },
-    { name = "PARL_RX_DATA6",       id = 53 },
-    { name = "PARL_RX_DATA7",       id = 54 },
-    { name = "I2CEXT1_SCL",         id = 55 },
-    { name = "I2CEXT1_SDA",         id = 56 },
-    { name = "FSPICLK",             id = 63 },
-    { name = "FSPIQ",               id = 64 },
-    { name = "FSPID",               id = 65 },
-    { name = "FSPIHD",              id = 66 },
-    { name = "FSPIWP",              id = 67 },
-    { name = "FSPICS0",             id = 68 },
-    { name = "PARL_RX_CLK",         id = 69 },
-    { name = "PARL_TX_CLK",         id = 70 },
-    { name = "RMT_SIG_0",           id = 71 },
-    { name = "RMT_SIG_1",           id = 72 },
-    { name = "TWAI0_RX",            id = 73 },
-    { name = "PWM0_SYNC0",          id = 87 },
-    { name = "PWM0_SYNC1",          id = 88 },
-    { name = "PWM0_SYNC2",          id = 89 },
-    { name = "PWM0_F0",             id = 90 },
-    { name = "PWM0_F1",             id = 91 },
-    { name = "PWM0_F2",             id = 92 },
-    { name = "PWM0_CAP0",           id = 93 },
-    { name = "PWM0_CAP1",           id = 94 },
-    { name = "PWM0_CAP2",           id = 95 },
-    { name = "SIG_FUNC_97",         id = 97 },
-    { name = "SIG_FUNC_98",         id = 98 },
-    { name = "SIG_FUNC_99",         id = 99 },
-    { name = "SIG_FUNC_100",        id = 100 },
-    { name = "PCNT0_SIG_CH0",       id = 101 },
-    { name = "PCNT0_SIG_CH1",       id = 102 },
-    { name = "PCNT0_CTRL_CH0",      id = 103 },
-    { name = "PCNT0_CTRL_CH1",      id = 104 },
-    { name = "PCNT1_SIG_CH0",       id = 105 },
-    { name = "PCNT1_SIG_CH1",       id = 106 },
-    { name = "PCNT1_CTRL_CH0",      id = 107 },
-    { name = "PCNT1_CTRL_CH1",      id = 108 },
-    { name = "PCNT2_SIG_CH0",       id = 109 },
-    { name = "PCNT2_SIG_CH1",       id = 110 },
-    { name = "PCNT2_CTRL_CH0",      id = 111 },
-    { name = "PCNT2_CTRL_CH1",      id = 112 },
-    { name = "PCNT3_SIG_CH0",       id = 113 },
-    { name = "PCNT3_SIG_CH1",       id = 114 },
-    { name = "PCNT3_CTRL_CH0",      id = 115 },
-    { name = "PCNT3_CTRL_CH1",      id = 116 },
-    { name = "SPIQ",                id = 121 },
-    { name = "SPID",                id = 122 },
-    { name = "SPIHD",               id = 123 },
-    { name = "SPIWP",               id = 124 },
-
-    { name = "MTDI" },
-    { name = "MTCK" },
-    { name = "MTMS" },
-]
-output_signals = [
-    { name = "LEDC_LS_SIG0",     id = 0 },
-    { name = "LEDC_LS_SIG1",     id = 1 },
-    { name = "LEDC_LS_SIG2",     id = 2 },
-    { name = "LEDC_LS_SIG3",     id = 3 },
-    { name = "LEDC_LS_SIG4",     id = 4 },
-    { name = "LEDC_LS_SIG5",     id = 5 },
-    { name = "U0TXD",            id = 6 },
-    { name = "U0RTS",            id = 7 },
-    { name = "U0DTR",            id = 8 },
-    { name = "U1TXD",            id = 9 },
-    { name = "U1RTS",            id = 10 },
-    { name = "U1DTR",            id = 11 },
-    { name = "I2S_MCLK",         id = 12 },
-    { name = "I2SO_BCK",         id = 13 },
-    { name = "I2SO_WS",          id = 14 },
-    { name = "I2SO_SD",          id = 15 },
-    { name = "I2SI_BCK",         id = 16 },
-    { name = "I2SI_WS",          id = 17 },
-    { name = "I2SO_SD1",         id = 18 },
-    { name = "USB_JTAG_TRST",    id = 19 },
-    { name = "CPU_GPIO_0",       id = 28 },
-    { name = "CPU_GPIO_1",       id = 29 },
-    { name = "CPU_GPIO_2",       id = 30 },
-    { name = "CPU_GPIO_3",       id = 31 },
-    { name = "CPU_GPIO_4",       id = 32 },
-    { name = "CPU_GPIO_5",       id = 33 },
-    { name = "CPU_GPIO_6",       id = 34 },
-    { name = "CPU_GPIO_7",       id = 35 },
-    { name = "I2CEXT0_SCL",      id = 45 },
-    { name = "I2CEXT0_SDA",      id = 46 },
-    { name = "PARL_TX_DATA0",    id = 47 },
-    { name = "PARL_TX_DATA1",    id = 48 },
-    { name = "PARL_TX_DATA2",    id = 49 },
-    { name = "PARL_TX_DATA3",    id = 50 },
-    { name = "PARL_TX_DATA4",    id = 51 },
-    { name = "PARL_TX_DATA5",    id = 52 },
-    { name = "PARL_TX_DATA6",    id = 53 },
-    { name = "PARL_TX_DATA7",    id = 54 },
-    { name = "I2CEXT1_SCL",      id = 55 },
-    { name = "I2CEXT1_SDA",      id = 56 },
-    { name = "FSPICLK",          id = 63 },
-    { name = "FSPIQ",            id = 64 },
-    { name = "FSPID",            id = 65 },
-    { name = "FSPIHD",           id = 66 },
-    { name = "FSPIWP",           id = 67 },
-    { name = "FSPICS0",          id = 68 },
-    { name = "PARL_RX_CLK",      id = 69 },
-    { name = "PARL_TX_CLK",      id = 70 },
-    { name = "RMT_SIG_0",        id = 71 },
-    { name = "RMT_SIG_1",        id = 72 },
-    { name = "TWAI0_TX",         id = 73 },
-    { name = "TWAI0_BUS_OFF_ON", id = 74 },
-    { name = "TWAI0_CLKOUT",     id = 75 },
-    { name = "TWAI0_STANDBY",    id = 76 },
-    { name = "CTE_ANT7",         id = 78 },
-    { name = "CTE_ANT8",         id = 79 },
-    { name = "CTE_ANT9",         id = 80 },
-    { name = "GPIO_SD0",         id = 83 },
-    { name = "GPIO_SD1",         id = 84 },
-    { name = "GPIO_SD2",         id = 85 },
-    { name = "GPIO_SD3",         id = 86 },
-    { name = "PWM0_0A",          id = 87 },
-    { name = "PWM0_0B",          id = 88 },
-    { name = "PWM0_1A",          id = 89 },
-    { name = "PWM0_1B",          id = 90 },
-    { name = "PWM0_2A",          id = 91 },
-    { name = "PWM0_2B",          id = 92 },
-    { name = "SIG_IN_FUNC97",    id = 97 },
-    { name = "SIG_IN_FUNC98",    id = 98 },
-    { name = "SIG_IN_FUNC99",    id = 99 },
-    { name = "SIG_IN_FUNC100",   id = 100 },
-    { name = "FSPICS1",          id = 101 },
-    { name = "FSPICS2",          id = 102 },
-    { name = "FSPICS3",          id = 103 },
-    { name = "FSPICS4",          id = 104 },
-    { name = "FSPICS5",          id = 105 },
-    { name = "CTE_ANT10",        id = 106 },
-    { name = "CTE_ANT11",        id = 107 },
-    { name = "CTE_ANT12",        id = 108 },
-    { name = "CTE_ANT13",        id = 109 },
-    { name = "CTE_ANT14",        id = 110 },
-    { name = "CTE_ANT15",        id = 111 },
-    { name = "SPICLK",           id = 114 },
-    { name = "SPICS0",           id = 115 },
-    { name = "SPICS1",           id = 116 },
-    { name = "SPIQ",             id = 121 },
-    { name = "SPID",             id = 122 },
-    { name = "SPIHD",            id = 123 },
-    { name = "SPIWP",            id = 124 },
-    { name = "CLK_OUT_OUT1",     id = 125 },
-    { name = "CLK_OUT_OUT2",     id = 126 },
-    { name = "CLK_OUT_OUT3",     id = 127 },
-    { name = "GPIO",             id = 128 },
-
-    { name = "MTDO" }
-]
+# {include gpio.toml}
 
 [device.dedicated_gpio]
 version = "riscv_v1"
@@ -395,7 +198,7 @@ channels = [["CPU_GPIO_0", "CPU_GPIO_1", "CPU_GPIO_2", "CPU_GPIO_3", "CPU_GPIO_4
 
 [device.i2c_master]
 support_status = "supported"
-version = 3
+version = 4
 instances = [
     { name = "i2c0", sys_instance = "I2cExt0", scl = "I2CEXT0_SCL", sda = "I2CEXT0_SDA" },
     { name = "i2c1", sys_instance = "I2cExt1", scl = "I2CEXT1_SCL", sda = "I2CEXT1_SDA" },
@@ -412,6 +215,7 @@ has_reliable_fsm_reset = true
 has_arbitration_en = true
 has_tx_fifo_watermark = true
 bus_timeout_is_exponential = true
+has_pd_en = true
 
 [device.i2c_slave]
 support_status = { status = "not_supported", issue = 1909 }
@@ -421,6 +225,9 @@ support_status = "partial"
 status_registers = 2
 software_interrupt_count = 4
 controller = { Riscv = { flavour = "plic", interrupts = 32, priority_levels = 15 } }
+# The PLIC priority threshold does not mask the machine software interrupt, so raising the run
+# level masks it in `mie` instead.
+context_switch_source = "clint"
 
 [device.rmt]
 support_status = "partial"
@@ -446,7 +253,8 @@ support_status = "partial"
 algo = { sha1 = 0, sha224 = 1, sha256 = 2 }
 
 [device.sdm]
-support_status = { status = "not_supported", issue = 2370 }
+support_status = "partial"
+channel_count = 4
 
 [device.ecdsa]
 support_status = { status = "not_supported", issue = 5444 }
@@ -458,13 +266,26 @@ support_status = "supported"
 has_app_interrupts = true
 has_dma_segmented_transfer = true
 instances = [
-    { name = "spi2", sys_instance = "Spi2", sclk = "FSPICLK", sio = ["FSPID", "FSPIQ", "FSPIWP", "FSPIHD"], cs = ["FSPICS0", "FSPICS1", "FSPICS2", "FSPICS3", "FSPICS4", "FSPICS5"] },
+    {
+        name = "spi2",
+        sys_instance = "Spi2",
+        sclk = "FSPICLK",
+        sio = ["FSPID", "FSPIQ", "FSPIWP", "FSPIHD"],
+        cs = ["FSPICS0", "FSPICS1", "FSPICS2", "FSPICS3", "FSPICS4", "FSPICS5"]
+    },
 ]
 
 [device.spi_slave]
 support_status = "partial"
 instances = [
-    { name = "spi2", sys_instance = "Spi2", sclk = "FSPICLK",  mosi = "FSPID",  miso = "FSPIQ",  cs = "FSPICS0" },
+    {
+        name = "spi2",
+        sys_instance = "Spi2",
+        sclk = "FSPICLK",
+        mosi = "FSPID",
+        miso = "FSPIQ",
+        cs = "FSPICS0"
+    },
 ]
 
 [device.timergroup]
@@ -491,7 +312,7 @@ support_status = "partial"
 support_status = { status = "not_supported", issue = 884 }
 
 [device.rng]
-support_status = "partial"
+support_status = { status = "partial", issue = 5979 }
 trng_supported = true
 apb_cycle_wait_num = 16 # TODO
 
@@ -503,6 +324,21 @@ version = 2
 support_status = "partial"
 light_sleep = true
 deep_sleep = true
+# esp32h2 has no separate per-pin path: `pin_wakeup_version` stays unset because the per-pin
+# registers *are* the ext1 registers.
+ext1_version = 2
+wakeup_sources = {
+    Ext1 = 1,
+    Gpio = 2,
+    WifiBeacon = 3,
+    Timer = 4,
+    Wifi = 5,
+    Uart0 = 6,
+    Uart1 = 7,
+    Sdio = 8,
+    Bt = 10,
+    LpCore = 11,
+}
 
 # Other drivers which are partially supported but have no other configuration:
 
@@ -512,16 +348,43 @@ deep_sleep = true
 ## Interfaces
 [device.i2s]
 version = 3
-default_clock_source = 1
 mclk_divider_bit_width = 9
 max_ws_width = 512
 clock_configured_by_pcr = true
+instances = [
+    {
+        name = "i2s0",
+        sys_instance = "I2s0",
+        mclk = "I2S_MCLK",
+        bclk = "I2SO_BCK",
+        ws = "I2SO_WS",
+        bclk_rx = "I2SI_BCK",
+        ws_rx = "I2SI_WS",
+        dout = ["I2SO_SD"],
+        din = ["I2SI_SD"],
+        pdm_tx = true,
+        pdm_rx = true,
+        pcm2pdm = true,
+    },
+]
 
 [device.ledc]
 version = 3
 channel_count = 6
 [device.mcpwm]
 [device.pcnt]
+instances = {
+    PCNT = {
+        sys_instance = "Pcnt",
+        interrupt = "PCNT",
+        units = [
+            { sig_ch0 = "PCNT0_SIG_CH0", sig_ch1 = "PCNT0_SIG_CH1", ctrl_ch0 = "PCNT0_CTRL_CH0", ctrl_ch1 = "PCNT0_CTRL_CH1" },
+            { sig_ch0 = "PCNT1_SIG_CH0", sig_ch1 = "PCNT1_SIG_CH1", ctrl_ch0 = "PCNT1_CTRL_CH0", ctrl_ch1 = "PCNT1_CTRL_CH1" },
+            { sig_ch0 = "PCNT2_SIG_CH0", sig_ch1 = "PCNT2_SIG_CH1", ctrl_ch0 = "PCNT2_CTRL_CH0", ctrl_ch1 = "PCNT2_CTRL_CH1" },
+            { sig_ch0 = "PCNT3_SIG_CH0", sig_ch1 = "PCNT3_SIG_CH1", ctrl_ch0 = "PCNT3_CTRL_CH0", ctrl_ch1 = "PCNT3_CTRL_CH1" },
+        ],
+    },
+}
 [device.twai]
 [device.usb_serial_jtag]
 
@@ -540,3 +403,6 @@ controller = "npl"
 [device.ieee802154]
 
 [device.phy]
+
+[device.avc]
+support_status = "not_supported"

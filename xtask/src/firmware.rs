@@ -6,11 +6,10 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
-use esp_metadata::Chip;
 use serde::Deserialize;
 use strum::IntoEnumIterator as _;
 
-use crate::{ScriptContext, windows_safe_path};
+use crate::{Package, ScriptContext, metadata::Chip, windows_safe_path};
 
 /// A single, configured example (or test).
 #[derive(Debug, Clone)]
@@ -111,19 +110,56 @@ impl Metadata {
             return false;
         };
 
-        filter == self.binary_name() || filter == self.output_file_name()
+        self.matches_name(filter)
     }
 
-    /// Check if the example matches the given name (case insensitive).
-    pub fn matches_name(&self, name: &str) -> bool {
-        name.to_lowercase() == self.binary_name() || name.to_lowercase() == self.output_file_name()
+    /// Returns this example's path relative to `package_root` for matching.
+    ///
+    /// Drops a `.rs` suffix and a `src/bin/` prefix, so nested projects become
+    /// `ota/update` and bins stay `sleep_timer`.
+    pub fn lookup_name(&self, package_root: &Path) -> String {
+        let path = self.example_path();
+        let relative = path.strip_prefix(package_root).unwrap_or(path);
+        let mut name = relative.to_string_lossy().replace('\\', "/");
+        if let Some(stripped) = name.strip_suffix(".rs") {
+            name = stripped.to_string();
+        }
+        if let Some(stripped) = name.strip_prefix("src/bin/") {
+            name = stripped.to_string();
+        }
+        name
     }
+
+    /// Checks if the example matches the given name (case insensitive).
+    ///
+    /// Accepts the binary name, the output file name, and a relative path
+    /// (`ota/update`, `examples/ota/update`).
+    pub fn matches_name(&self, name: &str) -> bool {
+        let name = normalize_source_name(name);
+        if name.is_empty() {
+            return false;
+        }
+        if name == self.binary_name().to_lowercase()
+            || name == self.output_file_name().to_lowercase()
+        {
+            return true;
+        }
+        let path = normalize_source_name(&self.example_path().to_string_lossy());
+        path.ends_with(&format!("/{name}"))
+    }
+}
+
+fn normalize_source_name(name: &str) -> String {
+    name.trim()
+        .trim_end_matches(".rs")
+        .replace('\\', "/")
+        .to_lowercase()
 }
 
 /// A single configuration of an example, as parsed from metadata lines.
 #[derive(Debug, Default, Clone)]
 pub struct Configuration {
-    chips: Vec<Chip>,
+    chips: Option<Vec<Chip>>,
     name: String,
     cargo_config: Vec<String>,
     features: Vec<String>,
@@ -240,7 +276,7 @@ pub fn load(path: &Path) -> Result<Vec<Metadata>> {
         //
         // If there are no named configurations, an unnamed default is created.
         let mut all_configuration = Configuration {
-            chips: Chip::iter().collect::<Vec<_>>(),
+            chips: Some(Chip::iter().collect::<Vec<_>>()),
             ..Configuration::default()
         };
 
@@ -264,7 +300,7 @@ pub fn load(path: &Path) -> Result<Vec<Metadata>> {
             match meta_line.key.as_str() {
                 "CHIP_FILTER" => {
                     let chips = parse_chips(meta_line.value.as_str())?;
-                    relevant_metadata.apply(|meta| meta.chips = chips.clone());
+                    relevant_metadata.apply(|meta| meta.chips = Some(chips.clone()));
                 }
                 // A list of cargo `--config` configurations.
                 "CARGO-CONFIG" => {
@@ -321,8 +357,8 @@ pub fn load(path: &Path) -> Result<Vec<Metadata>> {
 
         // Merge "all" into configurations
         for meta in configurations.values_mut() {
-            // Chips is a filter, inherit if empty
-            if meta.chips.is_empty() {
+            // Chips is a filter, inherit if unset
+            if meta.chips.is_none() {
                 meta.chips = all_configuration.chips.clone();
             }
 
@@ -360,7 +396,7 @@ pub fn load(path: &Path) -> Result<Vec<Metadata>> {
             // Sort the features so they are in a deterministic order:
             configuration.features.sort();
 
-            for chip in &configuration.chips {
+            for chip in configuration.chips.as_deref().unwrap_or(&[]) {
                 examples.push(Metadata {
                     // File properties
                     example_path: path.clone(),
@@ -406,12 +442,9 @@ fn parse_chips_from_annotation(
     {
         let meta = parse_meta_line(line)
             .with_context(|| format!("Failed to parse line {}", line_no + 1))?;
-        match meta.key.as_str() {
-            "CHIP_FILTER" => {
-                found = true;
-                chips = parse_chips(meta.value.as_str())?;
-            }
-            _ => {}
+        if meta.key.as_str() == "CHIP_FILTER" {
+            found = true;
+            chips = parse_chips(meta.value.as_str())?;
         }
     }
 
@@ -471,7 +504,7 @@ pub fn load_cargo_toml(examples_path: &Path) -> Result<Vec<Metadata>> {
         let chips = cargo_chips.into_iter().filter(|c| {
             chips_from_annotations
                 .as_ref()
-                .map_or(true, |set| set.contains(c))
+                .is_none_or(|set| set.contains(c))
         });
 
         for chip in chips {
@@ -491,6 +524,33 @@ pub fn load_cargo_toml(examples_path: &Path) -> Result<Vec<Metadata>> {
     }
 
     Ok(examples)
+}
+
+/// Load every example or test the given package owns.
+///
+/// Packages keep their firmware in one of three shapes: a directory of standalone projects, a
+/// `src/bin` directory, or an `examples` directory.
+pub fn load_package(workspace: &Path, package: Package) -> Result<Vec<Metadata>> {
+    let root = windows_safe_path(&workspace.join(package.directory()));
+    if package.contains_standalone_projects() {
+        return load_cargo_toml(&root);
+    }
+
+    let bins = match package {
+        Package::QaTest | Package::HilTest | Package::HilTestRadio => root.join("src").join("bin"),
+        _ => root.join("examples"),
+    };
+
+    let mut firmware = load(&bins)?;
+    // hil-test-radio keeps the tests and their harness firmware in subdirectories.
+    for nested in ["tests", "support"] {
+        let dir = bins.join(nested);
+        if dir.exists() {
+            firmware.extend(load(&dir)?);
+        }
+    }
+
+    Ok(firmware)
 }
 
 /// Find the metadata entry for an artifact/test name.

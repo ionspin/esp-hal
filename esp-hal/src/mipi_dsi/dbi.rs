@@ -59,7 +59,7 @@ impl<'bus, 'd> DsiDbi<'bus, 'd> {
         self.virtual_channel
     }
 
-    /// Send a DCS write command with zero or more parameters.
+    /// Sends a DCS write command with zero or more parameters.
     ///
     /// Uses a short-write packet for 0 or 1 parameters, a long-write packet
     /// otherwise.
@@ -84,13 +84,12 @@ impl<'bus, 'd> DsiDbi<'bus, 'd> {
             h.gen_pld_data().write(|w| unsafe { w.bits(word) });
 
             let rest = &params[merged..];
-            let mut chunks = rest.chunks_exact(4);
-            for chunk in chunks.by_ref() {
-                let w32 = u32::from_le_bytes(chunk.try_into().unwrap());
+            let (chunks, tail) = rest.as_chunks::<4>();
+            for chunk in chunks {
+                let w32 = u32::from_le_bytes(*chunk);
                 while h.cmd_pkt_status().read().gen_pld_w_full().bit_is_set() {}
                 h.gen_pld_data().write(|w| unsafe { w.bits(w32) });
             }
-            let tail = chunks.remainder();
             if !tail.is_empty() {
                 let mut w32: u32 = 0;
                 for (i, &b) in tail.iter().enumerate() {
@@ -131,7 +130,7 @@ impl<'bus, 'd> DsiDbi<'bus, 'd> {
         Ok(())
     }
 
-    /// Issue a DCS read command (BTA) and drain the response into `out`.
+    /// Issues a DCS read command (BTA) and drains the response into `out`.
     ///
     /// Returns the number of bytes placed into `out`.
     pub fn read_cmd(&mut self, cmd: u8, out: &mut [u8]) -> Result<usize, Error> {
